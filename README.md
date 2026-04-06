@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # RTL Design of a TPU-Inspired Systolic Array Accelerator for High-Performance Matrix Computation with Diagonal Dataflow
 This project implements an NxN systolic array-based matrix multiplication accelerator using SystemVerilog. The design leverages parallel multiply-accumulate (MAC) operations with diagonal dataflow to achieve high throughput. It includes a controller FSM, BRAM-based memory, and a scalable architecture suitable for FPGA deployment
 
@@ -42,6 +43,11 @@ Fully pipelined design <br>
 
 
 
+=======
+# TPU_systolic_array
+This project implements a systolic array-based accelerator for matrix multiplication on FPGA. It performs parallel multiply-accumulate (MAC) operations using streaming inputs for weight and data matrices. The system improves computational throughput for dense linear algebra workloads.
+<<<<<<< HEAD
+>>>>>>> 9ef47cd510023d6b2adcc36e7a8b4b36382090d7
 
 
 
