@@ -1,0 +1,27 @@
+when we run the C program and give matrix A and matrix B or let it generate them.
+The C program sends those values byte by byte to the FPGA through UART.
+nexys_a7_top.v receives the UART data and writes A and B into BRAM.
+The C program sends start.
+controller.v starts the operation, clears old output, loads data, runs compute, and finishes.
+tpu_top.v is the main engine that connects memory, controller, and compute array.
+a_bram.v and b_bram.v store input matrices; c_bram.v stores the result.
+systolic_array.v does the matrix multiplication using many pe.v blocks.
+Each pe.v multiplies and accumulates, so DSPs do the heavy math.
+When done, the FPGA shows cycle count and start/done/busy on LEDs.
+The C program asks the FPGA for output C, and the FPGA sends it back through UART.
+The C program saves A, B, and FPGA output C into files.
+check_output.py recomputes A x B in software and checks if FPGA output is correct.
+
+
+
+modules other than 
+
+uart_rx.v: receives bytes from PC.
+uart_tx.v: sends bytes back to PC.
+params.vh: keeps N, widths, clock, baud settings.
+tb_tpu_top.v: only for simulation, not for real FPGA.
+create_project.tcl: opens everything in Vivado.
+nexys_a7_top.xdc: connects FPGA pins to clock, UART, LEDs, reset.
+
+
+If reset is pressed, the controller immediately goes to idle and the current run stops.
