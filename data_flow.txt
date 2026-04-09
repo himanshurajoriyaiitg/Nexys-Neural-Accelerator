@@ -1,4 +1,6 @@
-when we run the C program and give matrix A and matrix B or let it generate them.
+-- DATA FLOW --
+
+When we run the C program and give matrix A and matrix B or let it generate them.
 The C program sends those values byte by byte to the FPGA through UART.
 nexys_a7_top.v receives the UART data and writes A and B into BRAM.
 The C program sends start.
