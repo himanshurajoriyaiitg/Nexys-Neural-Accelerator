@@ -1,114 +1,343 @@
-// =============================================================================
-// tpu_top.sv  -  Top-level: controller + diagonal feeder + systolic array
-//
-// Computes C = A * B for NxN signed integer matrices.
-//   A is stored in "weight.hex"  (row-major, 2-hex-digit per element)
-//   B is stored in "data0.hex"   (row-major, 2-hex-digit per element)
-//
-// ── Diagonal (skewed) feeding ─────────────────────────────────────────────
-//
-//   For C[i][j] = Σ_k A[i][k]*B[k][j], element A[i][k] must meet B[k][j]
-//   at PE(i,j).  Because data takes one clock per PE hop:
-//     A[i][k] injected at LEFT  edge row i reaches PE(i,j) at cycle k+j.
-//     B[k][j] injected at TOP   edge col j reaches PE(i,j) at cycle k+i.
-//   For them to meet at the same cycle:
-//     Inject A[i][k] at cycle (k + i)  →  feed_a[i] = A[i][ cycle - i ]
-//     Inject B[k][j] at cycle (k + j)  →  feed_b[j] = B[ cycle - j ][j]
-//
-// ── KEY FIX vs original ───────────────────────────────────────────────────
-//   Original code used the same loop variable `ii` for BOTH the A-row skew
-//   and the B-column skew, and gated both on `en`.  The feeder must use
-//   separate indices (ii for rows of A, jj for columns of B).
-//   The `en` gate is removed from the feeder: the range-check
-//   (0 <= k < N) already outputs 0 outside the valid window, and gating
-//   on `en` would suppress zeros that should propagate through the array.
-//
-// ── Overflow safety ───────────────────────────────────────────────────────
-//   ACCW = 2*DW + $clog2(N) guarantees no overflow for NxN multiply of
-//   DW-bit signed values.
-// =============================================================================
+`timescale 1ns / 1ps
+`include "params.vh"
+
 module tpu_top #(
-    parameter int N    = 4,
-    parameter int DW   = 8,
-    parameter int ACCW = 2*DW + $clog2(N)
+    parameter integer N       = `DEFAULT_MATRIX_N,
+    parameter integer ARRAY_N = `DEFAULT_ARRAY_N,
+    parameter integer DW      = `DEFAULT_DW,
+    parameter integer ACCW    = 2*DW + $clog2(N),
+    parameter integer ADDRW   = ((N*N) <= 1) ? 1 : $clog2(N*N)
 )(
-    input  logic                     clk,
-    input  logic                     rst_n,
-    input  logic                     tpu_start,
-    output logic                     tpu_done,
-    output logic signed [ACCW-1:0]   result [0:N-1][0:N-1]
+    input  wire                     clk,
+    input  wire                     rst_n,
+    input  wire                     start,
+    output wire                     busy,
+    output wire                     done,
+    output reg  [31:0]              cycle_count,
+    output wire                     debug_run_active,
+    output wire [RUN_W-1:0]         debug_run_count,
+
+    input  wire                     a_wr_en,
+    input  wire                     b_wr_en,
+    input  wire [ADDRW-1:0]         a_wr_addr,
+    input  wire [ADDRW-1:0]         b_wr_addr,
+    input  wire signed [DW-1:0]     a_wr_data,
+    input  wire signed [DW-1:0]     b_wr_data,
+
+    input  wire [ADDRW-1:0]         c_host_rd_addr,
+    output reg  signed [ACCW-1:0]   c_host_rd_data
 );
 
-    // ── Controller ────────────────────────────────────────────────────────────
-    logic        clear_acc;
-    logic        en;
-    logic [5:0]  cycle;
+    function integer clog2_safe;
+        input integer value;
+        begin
+            if (value <= 1) begin
+                clog2_safe = 1;
+            end else begin
+                clog2_safe = $clog2(value);
+            end
+        end
+    endfunction
+
+    localparam integer TILE_COUNT   = (N + ARRAY_N - 1) / ARRAY_N;
+    localparam integer MATRIX_ELEMS = N * N;
+    localparam integer TILE_ELEMS   = ARRAY_N * ARRAY_N;
+    localparam integer MATRIX_ADDRW = clog2_safe(MATRIX_ELEMS);
+    localparam integer TILE_IDX_W   = clog2_safe(TILE_COUNT);
+    localparam integer LOCAL_IDX_W  = clog2_safe(ARRAY_N);
+    localparam integer LOAD_W       = clog2_safe(TILE_ELEMS + 1);
+    localparam integer RUN_W        = clog2_safe((3 * ARRAY_N) - 1);
+    localparam integer WB_W         = clog2_safe(TILE_ELEMS + 1);
+
+    wire clear_c_active;
+    wire load_active;
+    wire writeback_active;
+    wire clear_acc;
+    wire run_en;
+
+    wire [MATRIX_ADDRW-1:0] clear_c_addr;
+    wire [TILE_IDX_W-1:0]   tile_row;
+    wire [TILE_IDX_W-1:0]   tile_col;
+    wire [TILE_IDX_W-1:0]   tile_k;
+    wire [LOAD_W-1:0]       load_count;
+    wire [RUN_W-1:0]        run_count;
+    wire [WB_W-1:0]         wb_count;
+
+    reg  [MATRIX_ADDRW-1:0] a_rd_addr;
+    reg  [MATRIX_ADDRW-1:0] b_rd_addr;
+    reg  [MATRIX_ADDRW-1:0] c_rd_addr;
+    wire signed [DW-1:0]    a_rd_data;
+    wire signed [DW-1:0]    b_rd_data;
+    wire signed [ACCW-1:0]  c_rd_data;
+
+    reg                     a_issue_valid;
+    reg                     b_issue_valid;
+    reg                     c_issue_valid;
+    reg                     load_meta_valid;
+    reg                     load_a_valid_d;
+    reg                     load_b_valid_d;
+    reg  [LOCAL_IDX_W-1:0]  load_row_d;
+    reg  [LOCAL_IDX_W-1:0]  load_col_d;
+    reg                     wb_meta_valid;
+    reg  [LOCAL_IDX_W-1:0]  wb_row_d;
+    reg  [LOCAL_IDX_W-1:0]  wb_col_d;
+    reg  [MATRIX_ADDRW-1:0] wb_addr_d;
+
+    reg                     c_wr_en;
+    reg  [MATRIX_ADDRW-1:0] c_wr_addr;
+    reg  signed [ACCW-1:0]  c_wr_data;
+
+    reg  signed [DW-1:0]    a_tile [0:ARRAY_N-1][0:ARRAY_N-1];
+    reg  signed [DW-1:0]    b_tile [0:ARRAY_N-1][0:ARRAY_N-1];
+    reg  signed [DW-1:0]    a_feed [0:ARRAY_N-1];
+    reg  signed [DW-1:0]    b_feed [0:ARRAY_N-1];
+    wire signed [ACCW-1:0]  partial_tile [0:ARRAY_N-1][0:ARRAY_N-1];
+
+    integer load_row_now;
+    integer load_col_now;
+    integer load_a_global_row;
+    integer load_a_global_col;
+    integer load_b_global_row;
+    integer load_b_global_col;
+    integer wb_row_now;
+    integer wb_col_now;
+    integer wb_global_row;
+    integer wb_global_col;
+    integer feed_idx;
+    integer feed_delta;
+    integer row_idx;
+    integer col_idx;
 
     controller #(
-        .N (N)
-    ) u_ctrl (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .start     (tpu_start),
-        .clear_acc (clear_acc),
-        .en        (en),
-        .done      (tpu_done),
-        .cycle     (cycle)
+        .N       (N),
+        .ARRAY_N (ARRAY_N)
+    ) u_controller (
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .start            (start),
+        .clear_c_active   (clear_c_active),
+        .load_active      (load_active),
+        .writeback_active (writeback_active),
+        .clear_acc        (clear_acc),
+        .run_en           (run_en),
+        .busy             (busy),
+        .done             (done),
+        .clear_c_addr     (clear_c_addr),
+        .tile_row         (tile_row),
+        .tile_col         (tile_col),
+        .tile_k           (tile_k),
+        .load_count       (load_count),
+        .run_count        (run_count),
+        .wb_count         (wb_count)
     );
 
-    // ── On-chip memory (loaded from hex files at simulation start) ────────────
-    logic signed [DW-1:0] A_mem [0:N*N-1];   // matrix A, row-major
-    logic signed [DW-1:0] B_mem [0:N*N-1];   // matrix B, row-major
+    assign debug_run_active = run_en;
+    assign debug_run_count  = run_count;
 
-    initial begin
-        $readmemh("weight.hex", A_mem);
-        $readmemh("data0.hex",  B_mem);
-    end
+    a_bram #(
+        .N     (N),
+        .DW    (DW),
+        .DEPTH (MATRIX_ELEMS),
+        .ADDRW (MATRIX_ADDRW)
+    ) u_a_bram (
+        .clk     (clk),
+        .wr_en   (a_wr_en),
+        .wr_addr (a_wr_addr),
+        .wr_data (a_wr_data),
+        .rd_addr (a_rd_addr),
+        .rd_data (a_rd_data)
+    );
 
-    // ── Combinational diagonal feeder ─────────────────────────────────────────
-    //
-    //   a_feed[i] = A_mem[i*N + (cycle-i)]   when 0 <= (cycle-i) < N
-    //               0                         otherwise
-    //
-    //   b_feed[j] = B_mem[(cycle-j)*N + j]   when 0 <= (cycle-j) < N
-    //               0                         otherwise
-    //
-    // NOTE: No `en` gate here.  The out-of-range check already makes feeds=0
-    //       outside the active window.  Gating on `en` would incorrectly
-    //       suppress the first valid cycle when en rises simultaneously.
-    logic signed [DW-1:0] a_feed [0:N-1];
-    logic signed [DW-1:0] b_feed [0:N-1];
+    b_bram #(
+        .N     (N),
+        .DW    (DW),
+        .DEPTH (MATRIX_ELEMS),
+        .ADDRW (MATRIX_ADDRW)
+    ) u_b_bram (
+        .clk     (clk),
+        .wr_en   (b_wr_en),
+        .wr_addr (b_wr_addr),
+        .wr_data (b_wr_data),
+        .rd_addr (b_rd_addr),
+        .rd_data (b_rd_data)
+    );
 
-    always_comb begin
-        for (int ii = 0; ii < N; ii++) begin
-            automatic int ka = int'(cycle) - ii;   // A row-skew
-            if (ka >= 0 && ka < N)
-                a_feed[ii] = A_mem[ii * N + ka];
-            else
-                a_feed[ii] = '0;
-        end
-        for (int jj = 0; jj < N; jj++) begin
-            automatic int kb = int'(cycle) - jj;   // B col-skew  (was wrongly `ii`)
-            if (kb >= 0 && kb < N)
-                b_feed[jj] = B_mem[kb * N + jj];
-            else
-                b_feed[jj] = '0;
-        end
-    end
+    c_bram #(
+        .N     (N),
+        .ACCW  (ACCW),
+        .DEPTH (MATRIX_ELEMS),
+        .ADDRW (MATRIX_ADDRW)
+    ) u_c_bram (
+        .clk     (clk),
+        .wr_en   (c_wr_en),
+        .wr_addr (c_wr_addr),
+        .wr_data (c_wr_data),
+        .rd_addr (c_rd_addr),
+        .rd_data (c_rd_data)
+    );
 
-    // ── Systolic array ────────────────────────────────────────────────────────
     systolic_array #(
-        .N    (N),
-        .DW   (DW),
-        .ACCW (ACCW)
-    ) u_sa (
+        .ARRAY_N (ARRAY_N),
+        .DW      (DW),
+        .ACCW    (ACCW)
+    ) u_systolic_array (
         .clk       (clk),
         .rst_n     (rst_n),
         .clear_acc (clear_acc),
-        .en        (en),
+        .en        (run_en),
         .a_in      (a_feed),
         .b_in      (b_feed),
-        .c_out     (result)
+        .c_out     (partial_tile)
     );
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cycle_count <= 32'd0;
+        end else if (start && !busy) begin
+            cycle_count <= 32'd0;
+        end else if (busy) begin
+            cycle_count <= cycle_count + 1'b1;
+        end
+    end
+
+    always @(*) begin
+        load_row_now      = 0;
+        load_col_now      = 0;
+        load_a_global_row = 0;
+        load_a_global_col = 0;
+        load_b_global_row = 0;
+        load_b_global_col = 0;
+
+        a_issue_valid = 1'b0;
+        b_issue_valid = 1'b0;
+        a_rd_addr     = '0;
+        b_rd_addr     = '0;
+
+        if (load_active && (load_count < TILE_ELEMS)) begin
+            load_row_now = load_count / ARRAY_N;
+            load_col_now = load_count % ARRAY_N;
+
+            load_a_global_row = (tile_row * ARRAY_N) + load_row_now;
+            load_a_global_col = (tile_k   * ARRAY_N) + load_col_now;
+            load_b_global_row = (tile_k   * ARRAY_N) + load_row_now;
+            load_b_global_col = (tile_col * ARRAY_N) + load_col_now;
+
+            if ((load_a_global_row < N) && (load_a_global_col < N)) begin
+                a_issue_valid = 1'b1;
+                a_rd_addr     = (load_a_global_row * N) + load_a_global_col;
+            end
+
+            if ((load_b_global_row < N) && (load_b_global_col < N)) begin
+                b_issue_valid = 1'b1;
+                b_rd_addr     = (load_b_global_row * N) + load_b_global_col;
+            end
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            load_meta_valid <= 1'b0;
+            load_a_valid_d  <= 1'b0;
+            load_b_valid_d  <= 1'b0;
+            load_row_d      <= '0;
+            load_col_d      <= '0;
+            wb_meta_valid   <= 1'b0;
+            wb_row_d        <= '0;
+            wb_col_d        <= '0;
+            wb_addr_d       <= '0;
+
+            for (row_idx = 0; row_idx < ARRAY_N; row_idx = row_idx + 1) begin
+                for (col_idx = 0; col_idx < ARRAY_N; col_idx = col_idx + 1) begin
+                    a_tile[row_idx][col_idx] <= '0;
+                    b_tile[row_idx][col_idx] <= '0;
+                end
+            end
+        end else begin
+            if (load_active && (load_count > 0) && load_meta_valid) begin
+                a_tile[load_row_d][load_col_d] <= load_a_valid_d ? a_rd_data : '0;
+                b_tile[load_row_d][load_col_d] <= load_b_valid_d ? b_rd_data : '0;
+            end
+
+            if (load_active && (load_count < TILE_ELEMS)) begin
+                load_meta_valid <= 1'b1;
+                load_a_valid_d  <= a_issue_valid;
+                load_b_valid_d  <= b_issue_valid;
+                load_row_d      <= load_row_now[LOCAL_IDX_W-1:0];
+                load_col_d      <= load_col_now[LOCAL_IDX_W-1:0];
+            end else begin
+                load_meta_valid <= 1'b0;
+                load_a_valid_d  <= 1'b0;
+                load_b_valid_d  <= 1'b0;
+            end
+
+            if (writeback_active && (wb_count < TILE_ELEMS)) begin
+                wb_meta_valid <= c_issue_valid;
+                wb_row_d      <= wb_row_now[LOCAL_IDX_W-1:0];
+                wb_col_d      <= wb_col_now[LOCAL_IDX_W-1:0];
+                wb_addr_d     <= c_rd_addr;
+            end else begin
+                wb_meta_valid <= 1'b0;
+            end
+        end
+    end
+
+    always @(*) begin
+        wb_row_now    = 0;
+        wb_col_now    = 0;
+        wb_global_row = 0;
+        wb_global_col = 0;
+
+        c_issue_valid = 1'b0;
+
+        if (writeback_active) begin
+            c_rd_addr = '0;
+        end else begin
+            c_rd_addr = c_host_rd_addr;
+        end
+
+        if (writeback_active && (wb_count < TILE_ELEMS)) begin
+            wb_row_now    = wb_count / ARRAY_N;
+            wb_col_now    = wb_count % ARRAY_N;
+            wb_global_row = (tile_row * ARRAY_N) + wb_row_now;
+            wb_global_col = (tile_col * ARRAY_N) + wb_col_now;
+
+            if ((wb_global_row < N) && (wb_global_col < N)) begin
+                c_issue_valid = 1'b1;
+                c_rd_addr     = (wb_global_row * N) + wb_global_col;
+            end
+        end
+    end
+
+    always @(*) begin
+        c_wr_en      = 1'b0;
+        c_wr_addr    = '0;
+        c_wr_data    = '0;
+        c_host_rd_data = c_rd_data;
+
+        if (clear_c_active) begin
+            c_wr_en   = 1'b1;
+            c_wr_addr = clear_c_addr;
+            c_wr_data = '0;
+        end else if (wb_meta_valid) begin
+            c_wr_en   = 1'b1;
+            c_wr_addr = wb_addr_d;
+            c_wr_data = c_rd_data + partial_tile[wb_row_d][wb_col_d];
+        end
+    end
+
+    always @(*) begin
+        for (feed_idx = 0; feed_idx < ARRAY_N; feed_idx = feed_idx + 1) begin
+            feed_delta     = run_count - feed_idx;
+            a_feed[feed_idx] = '0;
+            b_feed[feed_idx] = '0;
+
+            if (run_en) begin
+                if ((run_count >= feed_idx) && (feed_delta < ARRAY_N)) begin
+                    a_feed[feed_idx] = a_tile[feed_idx][feed_delta];
+                    b_feed[feed_idx] = b_tile[feed_delta][feed_idx];
+                end
+            end
+        end
+    end
 
 endmodule
