@@ -1,37 +1,28 @@
-// =============================================================================
-// systolic_array.sv  -  N×N grid of Processing Elements
-//
-// Data flow:
-//   a_in[i]  → feeds the LEFT  edge of row i, propagates right
-//   b_in[j]  → feeds the TOP   edge of col j, propagates downward
-//   c_out[i][j] = accumulated dot-product at PE(i,j)
-//
-// clear_acc is broadcast globally to zero every PE before a new run.
-// =============================================================================
+`timescale 1ns / 1ps
+`include "params.vh"
+
 module systolic_array #(
-    parameter int N    = 4,
-    parameter int DW   = 8,
-    parameter int ACCW = 21
+    parameter integer ARRAY_N = `DEFAULT_ARRAY_N,
+    parameter integer DW      = `DEFAULT_DW,
+    parameter integer ACCW    = `DEFAULT_ACCW
 )(
-    input  logic                     clk,
-    input  logic                     rst_n,
-    input  logic                     clear_acc,
-    input  logic                     en,
-    input  logic signed [DW-1:0]     a_in  [0:N-1],   // one value per row
-    input  logic signed [DW-1:0]     b_in  [0:N-1],   // one value per col
-    output logic signed [ACCW-1:0]   c_out [0:N-1][0:N-1]
+    input  wire                                 clk,
+    input  wire                                 rst_n,
+    input  wire                                 clear_acc,
+    input  wire                                 en,
+    input  wire signed [DW-1:0]                 a_in [0:ARRAY_N-1],
+    input  wire signed [DW-1:0]                 b_in [0:ARRAY_N-1],
+    output wire signed [ACCW-1:0]               c_out [0:ARRAY_N-1][0:ARRAY_N-1]
 );
 
-    // Internal buses:
-    //   a_bus[i][j] = a_out of PE(i,j)  →  a_in of PE(i,j+1)
-    //   b_bus[i][j] = b_out of PE(i,j)  →  b_in of PE(i+1,j)
-    logic signed [DW-1:0] a_bus [0:N-1][0:N-1];
-    logic signed [DW-1:0] b_bus [0:N-1][0:N-1];
+    wire signed [DW-1:0] a_bus [0:ARRAY_N-1][0:ARRAY_N-1];
+    wire signed [DW-1:0] b_bus [0:ARRAY_N-1][0:ARRAY_N-1];
 
-    genvar i, j;
+    genvar row_idx;
+    genvar col_idx;
     generate
-        for (i = 0; i < N; i++) begin : row_gen
-            for (j = 0; j < N; j++) begin : col_gen
+        for (row_idx = 0; row_idx < ARRAY_N; row_idx = row_idx + 1) begin : gen_rows
+            for (col_idx = 0; col_idx < ARRAY_N; col_idx = col_idx + 1) begin : gen_cols
                 pe #(
                     .DW   (DW),
                     .ACCW (ACCW)
@@ -40,11 +31,11 @@ module systolic_array #(
                     .rst_n     (rst_n),
                     .clear_acc (clear_acc),
                     .en        (en),
-                    .a_in      ((j == 0) ? a_in[i]       : a_bus[i][j-1]),
-                    .b_in      ((i == 0) ? b_in[j]       : b_bus[i-1][j]),
-                    .a_out     (a_bus[i][j]),
-                    .b_out     (b_bus[i][j]),
-                    .acc       (c_out[i][j])
+                    .a_in      ((col_idx == 0) ? a_in[row_idx] : a_bus[row_idx][col_idx-1]),
+                    .b_in      ((row_idx == 0) ? b_in[col_idx] : b_bus[row_idx-1][col_idx]),
+                    .a_out     (a_bus[row_idx][col_idx]),
+                    .b_out     (b_bus[row_idx][col_idx]),
+                    .acc       (c_out[row_idx][col_idx])
                 );
             end
         end
