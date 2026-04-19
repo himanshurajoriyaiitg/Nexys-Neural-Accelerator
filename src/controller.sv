@@ -11,6 +11,7 @@ module controller #(
     parameter integer RUN_LAST       = (3 * ARRAY_N) - 3,
     parameter integer ADDRW          = (MATRIX_ELEMS <= 1) ? 1 : $clog2(MATRIX_ELEMS),
     parameter integer TILE_IDX_W     = (TILE_COUNT_MAX <= 1) ? 1 : $clog2(TILE_COUNT_MAX),
+    parameter integer TILE_COUNT_W   = ((TILE_COUNT_MAX + 1) <= 1) ? 1 : $clog2(TILE_COUNT_MAX + 1),
     parameter integer LOAD_W         = ((TILE_ELEMS + 1) <= 1) ? 1 : $clog2(TILE_ELEMS + 1),
     parameter integer RUN_W          = ((RUN_LAST + 1) <= 1) ? 1 : $clog2(RUN_LAST + 1),
     parameter integer WB_W           = ((TILE_ELEMS + 1) <= 1) ? 1 : $clog2(TILE_ELEMS + 1)
@@ -48,14 +49,16 @@ module controller #(
 
     reg [2:0] state;
     reg [ADDRW:0] active_matrix_elems;
-    reg [TILE_IDX_W-1:0] active_tile_count;
+    reg [TILE_COUNT_W-1:0] active_tile_count;
 
     wire start_valid;
+    wire [ADDRW:0] clear_c_last_ext;
     wire [ADDRW-1:0] clear_c_last;
     wire [TILE_IDX_W-1:0] tile_last;
 
     assign start_valid = (matrix_dim >= 1) && (matrix_dim <= N);
-    assign clear_c_last = active_matrix_elems[ADDRW-1:0] - 1'b1;
+    assign clear_c_last_ext = active_matrix_elems - 1'b1;
+    assign clear_c_last = clear_c_last_ext[ADDRW-1:0];
     assign tile_last = active_tile_count - 1'b1;
 
     always @(*) begin
