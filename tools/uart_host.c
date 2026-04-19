@@ -30,7 +30,8 @@
 #define RESP_STATUS 0xA6
 #define RESP_DUMP   0xA7
 
-#define MAX_N 8
+#define MAX_RUNTIME_N 255
+#define MAX_MATRIX_ELEMS 65535u
 
 struct options {
     const char *port;
@@ -58,8 +59,8 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s --port <serial> --random [--n 8] [--seed 1] [--out-dir fpga_output] [--verbose]\n"
-            "  %s --port <serial> --matrix-a <file> --matrix-b <file> [--n 8] [--out-dir fpga_output] [--verbose]\n",
+            "  %s --port <serial> --random [--n 32] [--seed 1] [--out-dir fpga_output] [--verbose]\n"
+            "  %s --port <serial> --matrix-a <file> --matrix-b <file> [--n 32] [--out-dir fpga_output] [--verbose]\n",
             prog, prog);
 }
 
@@ -94,9 +95,9 @@ static void parse_args(int argc, char **argv, struct options *opt)
     int i;
 
     memset(opt, 0, sizeof(*opt));
-    opt->n = 8;
+    opt->n = 32;
     opt->baud = 115200;
-    opt->timeout_ms = 10000;
+    opt->timeout_ms = 30000;
     opt->out_dir = "fpga_output";
 
     for (i = 1; i < argc; ++i) {
@@ -132,8 +133,12 @@ static void parse_args(int argc, char **argv, struct options *opt)
         fail_msg("Missing --port.");
     }
 
-    if (opt->n < 1 || opt->n > MAX_N) {
-        fail_msg("This first implementation supports 1 <= N <= 8.");
+    if (opt->n < 1 || opt->n > MAX_RUNTIME_N) {
+        fail_msg("Runtime N must satisfy 1 <= N <= 255.");
+    }
+
+    if (((unsigned int)opt->n * (unsigned int)opt->n) > MAX_MATRIX_ELEMS) {
+        fail_msg("Runtime N is too large for the 16-bit UART address field.");
     }
 
     if (!opt->use_random && (opt->matrix_a_path == NULL || opt->matrix_b_path == NULL)) {
@@ -166,8 +171,10 @@ static void ensure_dir(const char *path)
 
 static void random_matrix(int8_t *mat, int n, unsigned int *seed)
 {
-    int idx;
-    for (idx = 0; idx < n * n; ++idx) {
+    size_t idx;
+    size_t elems = (size_t)n * (size_t)n;
+
+    for (idx = 0; idx < elems; ++idx) {
         mat[idx] = (int8_t)((next_rand_u32(seed) % 256u) - 128);
     }
 }
@@ -175,7 +182,8 @@ static void random_matrix(int8_t *mat, int n, unsigned int *seed)
 static void read_matrix_file(const char *path, int8_t *mat, int n)
 {
     FILE *fp;
-    int idx = 0;
+    size_t idx = 0;
+    size_t elems = (size_t)n * (size_t)n;
     int value;
 
     fp = fopen(path, "r");
@@ -183,7 +191,7 @@ static void read_matrix_file(const char *path, int8_t *mat, int n)
         fail(path);
     }
 
-    while (idx < (n * n) && fscanf(fp, "%d", &value) == 1) {
+    while (idx < elems && fscanf(fp, "%d", &value) == 1) {
         if (value < -128 || value > 127) {
             fclose(fp);
             fail_msg("Matrix file value out of signed 8-bit range.");
@@ -193,7 +201,7 @@ static void read_matrix_file(const char *path, int8_t *mat, int n)
 
     fclose(fp);
 
-    if (idx != (n * n)) {
+    if (idx != elems) {
         fail_msg("Matrix file does not contain exactly N*N values.");
     }
 }
@@ -211,7 +219,7 @@ static void write_matrix_i8(const char *path, const int8_t *mat, int n)
 
     for (r = 0; r < n; ++r) {
         for (c = 0; c < n; ++c) {
-            fprintf(fp, "%d", (int)mat[r * n + c]);
+            fprintf(fp, "%d", (int)mat[(r * n) + c]);
             if (c != (n - 1)) {
                 fputc(' ', fp);
             }
@@ -235,7 +243,7 @@ static void write_matrix_i32(const char *path, const int32_t *mat, int n)
 
     for (r = 0; r < n; ++r) {
         for (c = 0; c < n; ++c) {
-            fprintf(fp, "%d", mat[r * n + c]);
+            fprintf(fp, "%d", mat[(r * n) + c]);
             if (c != (n - 1)) {
                 fputc(' ', fp);
             }
@@ -440,14 +448,15 @@ static void read_exact(serial_handle_t handle, uint8_t *buf, size_t len, int tim
     }
 }
 
-static void send_frame(serial_handle_t handle, uint8_t cmd, uint8_t arg0, uint8_t arg1)
+static void send_frame(serial_handle_t handle, uint8_t cmd, uint16_t arg, uint8_t data)
 {
-    uint8_t frame[4];
+    uint8_t frame[5];
 
     frame[0] = FRAME_START;
     frame[1] = cmd;
-    frame[2] = arg0;
-    frame[3] = arg1;
+    frame[2] = (uint8_t)((arg >> 8) & 0xFFu);
+    frame[3] = (uint8_t)(arg & 0xFFu);
+    frame[4] = data;
     write_all(handle, frame, sizeof(frame));
 }
 
@@ -469,58 +478,64 @@ static void wait_ack(serial_handle_t handle, int timeout_ms, const char *stage)
 
 static void load_matrix(serial_handle_t handle, uint8_t cmd, const int8_t *mat, int n, int timeout_ms, bool verbose, const char *name)
 {
-    int idx;
+    uint16_t idx;
+    uint16_t elems = (uint16_t)(n * n);
     char msg[128];
 
-    for (idx = 0; idx < n * n; ++idx) {
-        if (verbose && ((idx % 8) == 0)) {
-            snprintf(msg, sizeof(msg), "Loading %s index %d/%d", name, idx, (n * n) - 1);
+    for (idx = 0; idx < elems; ++idx) {
+        if (verbose && ((idx % 32u) == 0u)) {
+            snprintf(msg, sizeof(msg), "Loading %s index %u/%u", name,
+                     (unsigned int)idx, (unsigned int)(elems - 1u));
             log_msg(true, msg);
         }
-        send_frame(handle, cmd, (uint8_t)idx, (uint8_t)mat[idx]);
+        send_frame(handle, cmd, idx, (uint8_t)mat[idx]);
         wait_ack(handle, timeout_ms, name);
     }
 }
 
-static void query_status(serial_handle_t handle, int timeout_ms, bool *busy, bool *done, uint16_t *cycles)
+static void query_status(serial_handle_t handle, int timeout_ms, bool *busy, bool *done, uint32_t *cycles)
 {
-    uint8_t resp[4];
+    uint8_t resp[6];
 
     send_frame(handle, CMD_STATUS, 0, 0);
     read_exact(handle, resp, sizeof(resp), timeout_ms, "status");
 
     if (resp[0] != RESP_STATUS) {
-        fprintf(stderr, "Bad status response from FPGA: 0x%02X 0x%02X 0x%02X 0x%02X\n",
-                resp[0], resp[1], resp[2], resp[3]);
+        fprintf(stderr, "Bad status response from FPGA: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n",
+                resp[0], resp[1], resp[2], resp[3], resp[4], resp[5]);
         exit(1);
     }
 
-    *busy = (resp[1] & 0x01) != 0;
-    *done = (resp[1] & 0x02) != 0;
-    *cycles = (uint16_t)(((uint16_t)resp[2] << 8) | resp[3]);
+    *busy = (resp[1] & 0x01u) != 0;
+    *done = (resp[1] & 0x02u) != 0;
+    *cycles = ((uint32_t)resp[2] << 24) |
+              ((uint32_t)resp[3] << 16) |
+              ((uint32_t)resp[4] << 8)  |
+              (uint32_t)resp[5];
 }
 
-static uint16_t wait_done(serial_handle_t handle, int timeout_ms, bool verbose)
+static uint32_t wait_done(serial_handle_t handle, int timeout_ms, bool verbose)
 {
     bool busy;
     bool done;
     bool saw_busy = false;
-    uint16_t cycles = 0;
+    uint32_t cycles = 0;
     uint64_t start_ms = monotonic_ms();
 
     while (true) {
         query_status(handle, timeout_ms, &busy, &done, &cycles);
         if (verbose) {
-            printf("Status: busy=%d done=%d cycles=%u\n", busy ? 1 : 0, done ? 1 : 0, (unsigned int)cycles);
+            printf("Status: busy=%d done=%d cycles=%u\n", busy ? 1 : 0, done ? 1 : 0, cycles);
             fflush(stdout);
         }
+
         if (busy) {
             saw_busy = true;
         }
         if (done && !busy) {
             return cycles;
         }
-        if (saw_busy && !busy && !done && cycles == 0) {
+        if (saw_busy && !busy && !done && cycles == 0u) {
             fail_msg("FPGA reset/abort detected. Controller returned to IDLE.");
         }
 
@@ -533,39 +548,44 @@ static uint16_t wait_done(serial_handle_t handle, int timeout_ms, bool verbose)
 
 static void dump_matrix_c(serial_handle_t handle, int32_t *mat, int n, int timeout_ms, bool verbose)
 {
-    uint8_t header[2];
+    uint8_t header[3];
     uint8_t raw[4];
-    int idx;
+    uint16_t idx;
+    uint16_t elems = (uint16_t)(n * n);
+    uint16_t returned_n;
 
     send_frame(handle, CMD_DUMP_C, 0, 0);
     read_exact(handle, header, sizeof(header), timeout_ms, "dump header");
     if (verbose) {
-        printf("Dump header bytes: 0x%02X 0x%02X\n", header[0], header[1]);
+        printf("Dump header bytes: 0x%02X 0x%02X 0x%02X\n", header[0], header[1], header[2]);
         fflush(stdout);
     }
 
     if (header[0] != RESP_DUMP) {
-        fprintf(stderr, "Bad dump response from FPGA: 0x%02X 0x%02X\n", header[0], header[1]);
+        fprintf(stderr, "Bad dump response from FPGA: 0x%02X 0x%02X 0x%02X\n",
+                header[0], header[1], header[2]);
         exit(1);
     }
-    if ((int)header[1] != n) {
+
+    returned_n = (uint16_t)(((uint16_t)header[1] << 8) | (uint16_t)header[2]);
+    if ((int)returned_n != n) {
         fail_msg("Dump size returned by FPGA does not match requested N.");
     }
 
-    for (idx = 0; idx < n * n; ++idx) {
+    for (idx = 0; idx < elems; ++idx) {
         read_exact(handle, raw, sizeof(raw), timeout_ms, "dump payload");
         mat[idx] = (int32_t)(((uint32_t)raw[0] << 24) |
                              ((uint32_t)raw[1] << 16) |
                              ((uint32_t)raw[2] << 8)  |
                              ((uint32_t)raw[3]));
-        if (verbose && ((idx % 8) == 0)) {
-            printf("Dumped C index %d/%d\n", idx, (n * n) - 1);
+        if (verbose && ((idx % 32u) == 0u)) {
+            printf("Dumped C index %u/%u\n", (unsigned int)idx, (unsigned int)(elems - 1u));
             fflush(stdout);
         }
     }
 }
 
-static void write_run_info(const char *path, int n, uint16_t cycles)
+static void write_run_info(const char *path, int n, uint32_t cycles)
 {
     FILE *fp = fopen(path, "w");
     if (fp == NULL) {
@@ -573,7 +593,7 @@ static void write_run_info(const char *path, int n, uint16_t cycles)
     }
 
     fprintf(fp, "MATRIX_N=%d\n", n);
-    fprintf(fp, "CYCLES_LOW16=%u\n", (unsigned int)cycles);
+    fprintf(fp, "CYCLES=%u\n", cycles);
     fclose(fp);
 }
 
@@ -581,15 +601,25 @@ int main(int argc, char **argv)
 {
     struct options opt;
     serial_handle_t serial_handle;
-    int8_t matrix_a[MAX_N * MAX_N];
-    int8_t matrix_b[MAX_N * MAX_N];
-    int32_t matrix_c[MAX_N * MAX_N];
-    uint16_t cycles;
+    size_t elems;
+    int8_t *matrix_a;
+    int8_t *matrix_b;
+    int32_t *matrix_c;
+    uint32_t cycles;
     char path_buf[512];
     unsigned int seed_value;
 
     parse_args(argc, argv, &opt);
     ensure_dir(opt.out_dir);
+
+    elems = (size_t)opt.n * (size_t)opt.n;
+    matrix_a = (int8_t *)malloc(elems * sizeof(*matrix_a));
+    matrix_b = (int8_t *)malloc(elems * sizeof(*matrix_b));
+    matrix_c = (int32_t *)malloc(elems * sizeof(*matrix_c));
+
+    if (matrix_a == NULL || matrix_b == NULL || matrix_c == NULL) {
+        fail_msg("Failed to allocate host matrices.");
+    }
 
     if (opt.use_random) {
         seed_value = opt.seed_given ? opt.seed : (unsigned int)time(NULL);
@@ -611,11 +641,9 @@ int main(int argc, char **argv)
     load_matrix(serial_handle, CMD_WRITE_A, matrix_a, opt.n, opt.timeout_ms, opt.verbose, "matrix A");
     load_matrix(serial_handle, CMD_WRITE_B, matrix_b, opt.n, opt.timeout_ms, opt.verbose, "matrix B");
     log_msg(opt.verbose, "Sending START.");
-    send_frame(serial_handle, CMD_START, 0, 0);
+    send_frame(serial_handle, CMD_START, (uint16_t)opt.n, 0);
     wait_ack(serial_handle, opt.timeout_ms, "start");
-    cycles = 0;
-    log_msg(opt.verbose, "Waiting 100 ms before dump.");
-    sleep_ms(100);
+    cycles = wait_done(serial_handle, opt.timeout_ms, opt.verbose);
     log_msg(opt.verbose, "Requesting dump.");
     dump_matrix_c(serial_handle, matrix_c, opt.n, opt.timeout_ms, opt.verbose);
 
@@ -629,7 +657,10 @@ int main(int argc, char **argv)
     printf("Wrote %s/matrix_a.txt\n", opt.out_dir);
     printf("Wrote %s/matrix_b.txt\n", opt.out_dir);
     printf("Wrote %s/matrix_c_fpga.txt\n", opt.out_dir);
-    printf("Last reported low-16 cycle count: %u\n", (unsigned int)cycles);
+    printf("Last reported cycle count: %u\n", cycles);
+
+    free(matrix_a);
+    free(matrix_b);
+    free(matrix_c);
     return 0;
 }
-
