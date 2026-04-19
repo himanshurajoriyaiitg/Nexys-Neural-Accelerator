@@ -1,8 +1,8 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 if "%1"=="" (
-    echo Usage: run_fpga_random.bat COM5 [N] [SEED]
+    echo Usage: batch_files\run_fpga_random.bat COM5 [N] [SEED]
     exit /b 1
 )
 set PORT=%1
@@ -12,7 +12,7 @@ if "%N%"=="" set N=8
 if "%SEED%"=="" set SEED=1
 
 if not exist tools\uart_host.exe (
-    call build_host.bat
+    call "%~dp0build_host.bat"
     if errorlevel 1 exit /b 1
 )
 

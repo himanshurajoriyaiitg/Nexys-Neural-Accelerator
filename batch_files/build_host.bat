@@ -1,6 +1,6 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 where cl >nul 2>nul
 if %errorlevel%==0 (
