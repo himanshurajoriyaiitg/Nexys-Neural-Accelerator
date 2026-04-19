@@ -2,21 +2,24 @@
 `include "params.vh"
 
 module controller #(
-    parameter integer N            = `DEFAULT_MATRIX_N,
-    parameter integer ARRAY_N      = `DEFAULT_ARRAY_N,
-    parameter integer TILE_COUNT   = (N + ARRAY_N - 1) / ARRAY_N,
-    parameter integer MATRIX_ELEMS = N * N,
-    parameter integer TILE_ELEMS   = ARRAY_N * ARRAY_N,
-    parameter integer RUN_LAST     = (3 * ARRAY_N) - 3,
-    parameter integer ADDRW        = (MATRIX_ELEMS <= 1) ? 1 : $clog2(MATRIX_ELEMS),
-    parameter integer TILE_IDX_W   = (TILE_COUNT <= 1) ? 1 : $clog2(TILE_COUNT),
-    parameter integer LOAD_W       = ((TILE_ELEMS + 1) <= 1) ? 1 : $clog2(TILE_ELEMS + 1),
-    parameter integer RUN_W        = ((RUN_LAST + 1) <= 1) ? 1 : $clog2(RUN_LAST + 1),
-    parameter integer WB_W         = ((TILE_ELEMS + 1) <= 1) ? 1 : $clog2(TILE_ELEMS + 1)
+    parameter integer N              = `DEFAULT_MATRIX_N,
+    parameter integer ARRAY_N        = `DEFAULT_ARRAY_N,
+    parameter integer DIM_W          = ((N + 1) <= 1) ? 1 : $clog2(N + 1),
+    parameter integer TILE_COUNT_MAX = (N + ARRAY_N - 1) / ARRAY_N,
+    parameter integer MATRIX_ELEMS   = N * N,
+    parameter integer TILE_ELEMS     = ARRAY_N * ARRAY_N,
+    parameter integer RUN_LAST       = (3 * ARRAY_N) - 3,
+    parameter integer ADDRW          = (MATRIX_ELEMS <= 1) ? 1 : $clog2(MATRIX_ELEMS),
+    parameter integer TILE_IDX_W     = (TILE_COUNT_MAX <= 1) ? 1 : $clog2(TILE_COUNT_MAX),
+    parameter integer TILE_COUNT_W   = ((TILE_COUNT_MAX + 1) <= 1) ? 1 : $clog2(TILE_COUNT_MAX + 1),
+    parameter integer LOAD_W         = ((TILE_ELEMS + 1) <= 1) ? 1 : $clog2(TILE_ELEMS + 1),
+    parameter integer RUN_W          = ((RUN_LAST + 1) <= 1) ? 1 : $clog2(RUN_LAST + 1),
+    parameter integer WB_W           = ((TILE_ELEMS + 1) <= 1) ? 1 : $clog2(TILE_ELEMS + 1)
 )(
     input  wire                    clk,
     input  wire                    rst_n,
     input  wire                    start,
+    input  wire [DIM_W-1:0]        matrix_dim,
 
     output reg                     clear_c_active,
     output reg                     load_active,
@@ -26,6 +29,7 @@ module controller #(
     output reg                     busy,
     output reg                     done,
 
+    output reg [DIM_W-1:0]         active_dim,
     output reg [ADDRW-1:0]         clear_c_addr,
     output reg [TILE_IDX_W-1:0]    tile_row,
     output reg [TILE_IDX_W-1:0]    tile_col,
@@ -44,6 +48,18 @@ module controller #(
     localparam [2:0] ST_DONE      = 3'd6;
 
     reg [2:0] state;
+    reg [ADDRW:0] active_matrix_elems;
+    reg [TILE_COUNT_W-1:0] active_tile_count;
+
+    wire start_valid;
+    wire [ADDRW:0] clear_c_last_ext;
+    wire [ADDRW-1:0] clear_c_last;
+    wire [TILE_IDX_W-1:0] tile_last;
+
+    assign start_valid = (matrix_dim >= 1) && (matrix_dim <= N);
+    assign clear_c_last_ext = active_matrix_elems - 1'b1;
+    assign clear_c_last = clear_c_last_ext[ADDRW-1:0];
+    assign tile_last = active_tile_count - 1'b1;
 
     always @(*) begin
         clear_c_active   = (state == ST_CLEAR_C);
@@ -58,14 +74,17 @@ module controller #(
     // Active-low asynchronous reset returns the controller to IDLE from any state.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state        <= ST_IDLE;
-            clear_c_addr <= '0;
-            tile_row     <= '0;
-            tile_col     <= '0;
-            tile_k       <= '0;
-            load_count   <= '0;
-            run_count    <= '0;
-            wb_count     <= '0;
+            state               <= ST_IDLE;
+            active_dim          <= '0;
+            active_matrix_elems <= '0;
+            active_tile_count   <= '0;
+            clear_c_addr        <= '0;
+            tile_row            <= '0;
+            tile_col            <= '0;
+            tile_k              <= '0;
+            load_count          <= '0;
+            run_count           <= '0;
+            wb_count            <= '0;
         end else begin
             case (state)
                 ST_IDLE: begin
@@ -77,13 +96,16 @@ module controller #(
                     run_count    <= '0;
                     wb_count     <= '0;
 
-                    if (start) begin
-                        state <= ST_CLEAR_C;
+                    if (start && start_valid) begin
+                        active_dim          <= matrix_dim;
+                        active_matrix_elems <= matrix_dim * matrix_dim;
+                        active_tile_count   <= (matrix_dim + ARRAY_N - 1) / ARRAY_N;
+                        state               <= ST_CLEAR_C;
                     end
                 end
 
                 ST_CLEAR_C: begin
-                    if (clear_c_addr == (MATRIX_ELEMS - 1)) begin
+                    if (clear_c_addr == clear_c_last) begin
                         clear_c_addr <= '0;
                         load_count   <= '0;
                         state        <= ST_LOAD;
@@ -120,13 +142,13 @@ module controller #(
                     if (wb_count == TILE_ELEMS) begin
                         wb_count <= '0;
 
-                        if (tile_k == (TILE_COUNT - 1)) begin
+                        if (tile_k == tile_last) begin
                             tile_k <= '0;
 
-                            if (tile_col == (TILE_COUNT - 1)) begin
+                            if (tile_col == tile_last) begin
                                 tile_col <= '0;
 
-                                if (tile_row == (TILE_COUNT - 1)) begin
+                                if (tile_row == tile_last) begin
                                     state <= ST_DONE;
                                 end else begin
                                     tile_row   <= tile_row + 1'b1;
