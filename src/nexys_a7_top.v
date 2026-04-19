@@ -5,6 +5,7 @@ module nexys_a7_top #(
     parameter integer N         = `DEFAULT_MATRIX_N,
     parameter integer ARRAY_N   = `DEFAULT_ARRAY_N,
     parameter integer DW        = `DEFAULT_DW,
+    parameter integer DIM_W     = ((N + 1) <= 1) ? 1 : $clog2(N + 1),
     parameter integer ACCW      = 2*DW + $clog2(N),
     parameter integer CLK_HZ    = `DEFAULT_CLK_HZ,
     parameter integer UART_BAUD = `DEFAULT_UART_BAUD
@@ -45,23 +46,27 @@ module nexys_a7_top #(
     localparam [7:0] RESP_STATUS = 8'hA6;
     localparam [7:0] RESP_DUMP   = 8'hA7;
 
-    localparam [1:0] RX_WAIT_START = 2'd0;
-    localparam [1:0] RX_WAIT_CMD   = 2'd1;
-    localparam [1:0] RX_WAIT_ARG0  = 2'd2;
-    localparam [1:0] RX_WAIT_ARG1  = 2'd3;
+    localparam [2:0] RX_WAIT_START = 3'd0;
+    localparam [2:0] RX_WAIT_CMD   = 3'd1;
+    localparam [2:0] RX_WAIT_AHI   = 3'd2;
+    localparam [2:0] RX_WAIT_ALO   = 3'd3;
+    localparam [2:0] RX_WAIT_DATA  = 3'd4;
 
     localparam [3:0] STREAM_IDLE         = 4'd0;
     localparam [3:0] STREAM_STATUS_FLAGS = 4'd1;
-    localparam [3:0] STREAM_STATUS_HI    = 4'd2;
-    localparam [3:0] STREAM_STATUS_LO    = 4'd3;
-    localparam [3:0] STREAM_DUMP_DIM     = 4'd4;
-    localparam [3:0] STREAM_DUMP_SETADDR = 4'd5;
-    localparam [3:0] STREAM_DUMP_WAIT0   = 4'd6;
-    localparam [3:0] STREAM_DUMP_WAIT1   = 4'd7;
-    localparam [3:0] STREAM_DUMP_B3      = 4'd8;
-    localparam [3:0] STREAM_DUMP_B2      = 4'd9;
-    localparam [3:0] STREAM_DUMP_B1      = 4'd10;
-    localparam [3:0] STREAM_DUMP_B0      = 4'd11;
+    localparam [3:0] STREAM_STATUS_C3    = 4'd2;
+    localparam [3:0] STREAM_STATUS_C2    = 4'd3;
+    localparam [3:0] STREAM_STATUS_C1    = 4'd4;
+    localparam [3:0] STREAM_STATUS_C0    = 4'd5;
+    localparam [3:0] STREAM_DUMP_DIM_HI  = 4'd6;
+    localparam [3:0] STREAM_DUMP_DIM_LO  = 4'd7;
+    localparam [3:0] STREAM_DUMP_SETADDR = 4'd8;
+    localparam [3:0] STREAM_DUMP_WAIT0   = 4'd9;
+    localparam [3:0] STREAM_DUMP_WAIT1   = 4'd10;
+    localparam [3:0] STREAM_DUMP_B3      = 4'd11;
+    localparam [3:0] STREAM_DUMP_B2      = 4'd12;
+    localparam [3:0] STREAM_DUMP_B1      = 4'd13;
+    localparam [3:0] STREAM_DUMP_B0      = 4'd14;
 
     localparam [2:0] DBG_IDLE      = 3'd0;
     localparam [2:0] DBG_START     = 3'd1;
@@ -86,11 +91,14 @@ module nexys_a7_top #(
     reg        tx_req_valid;
 
     reg                      core_start;
+    reg  [DIM_W-1:0]         requested_matrix_dim;
     wire                     core_busy;
     wire                     core_done;
     wire [31:0]              core_cycle_count;
     wire                     core_run_active;
     wire [RUN_W-1:0]         core_run_count;
+    wire [DIM_W-1:0]         active_matrix_dim;
+    wire [ADDRW:0]           active_matrix_elems;
 
     reg                      a_wr_en;
     reg                      b_wr_en;
@@ -101,31 +109,33 @@ module nexys_a7_top #(
     reg  [ADDRW-1:0]         c_host_rd_addr;
     wire signed [ACCW-1:0]   c_host_rd_data;
 
-    reg  [1:0]               rx_state;
+    reg  [2:0]               rx_state;
     reg  [7:0]               cmd_byte;
-    reg  [7:0]               arg0_byte;
-    reg  [7:0]               arg1_byte;
+    reg  [7:0]               addr_hi_byte;
+    reg  [7:0]               addr_lo_byte;
+    reg  [7:0]               data_byte;
     reg                      pending_cmd_valid;
     reg  [7:0]               pending_cmd_byte;
-    reg  [7:0]               pending_arg0_byte;
-    reg  [7:0]               pending_arg1_byte;
+    reg  [7:0]               pending_addr_hi_byte;
+    reg  [7:0]               pending_addr_lo_byte;
+    reg  [7:0]               pending_data_byte;
 
-    reg                      start_latched;
     reg                      done_latched;
-    reg                      cmd_accept_latched;
-    reg                      cmd_error_latched;
-    reg  [7:0]               rx_activity_stretch;
-
     reg  [3:0]               stream_state;
     reg  [ADDRW-1:0]         dump_index;
     reg  signed [31:0]       dump_word;
-    reg  [23:0]              start_led_timer;
-    reg  [23:0]              done_led_timer;
-    reg  [23:0]              cmd_accept_led_timer;
     reg  [DISPLAY_W-1:0]     display_div_count;
-    reg                      display_run_active;
     reg  [RUN_W-1:0]         display_run_count;
     reg  [2:0]               debug_phase;
+
+    wire [15:0] pending_word;
+    wire [ADDRW:0] dump_last_index;
+    wire [15:0] active_dim_u16;
+
+    assign pending_word = {pending_addr_hi_byte, pending_addr_lo_byte};
+    assign active_matrix_elems = active_matrix_dim * active_matrix_dim;
+    assign dump_last_index = active_matrix_elems - 1'b1;
+    assign active_dim_u16 = active_matrix_dim;
 
     uart_rx #(
         .CLK_HZ (CLK_HZ),
@@ -154,30 +164,35 @@ module nexys_a7_top #(
         .N       (N),
         .ARRAY_N (ARRAY_N),
         .DW      (DW),
-        .ACCW    (ACCW)
+        .DIM_W   (DIM_W),
+        .ACCW    (ACCW),
+        .ADDRW   (ADDRW),
+        .RUN_W   (RUN_W)
     ) u_tpu_top (
-        .clk            (clk),
-        .rst_n          (rst_n),
-        .start          (core_start),
-        .busy           (core_busy),
-        .done           (core_done),
-        .cycle_count    (core_cycle_count),
-        .debug_run_active(core_run_active),
-        .debug_run_count (core_run_count),
-        .a_wr_en        (a_wr_en),
-        .b_wr_en        (b_wr_en),
-        .a_wr_addr      (a_wr_addr),
-        .b_wr_addr      (b_wr_addr),
-        .a_wr_data      (a_wr_data),
-        .b_wr_data      (b_wr_data),
-        .c_host_rd_addr (c_host_rd_addr),
-        .c_host_rd_data (c_host_rd_data)
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .start            (core_start),
+        .matrix_dim       (requested_matrix_dim),
+        .busy             (core_busy),
+        .done             (core_done),
+        .cycle_count      (core_cycle_count),
+        .debug_run_active (core_run_active),
+        .debug_run_count  (core_run_count),
+        .active_matrix_dim(active_matrix_dim),
+        .a_wr_en          (a_wr_en),
+        .b_wr_en          (b_wr_en),
+        .a_wr_addr        (a_wr_addr),
+        .b_wr_addr        (b_wr_addr),
+        .a_wr_data        (a_wr_data),
+        .b_wr_data        (b_wr_data),
+        .c_host_rd_addr   (c_host_rd_addr),
+        .c_host_rd_data   (c_host_rd_data)
     );
 
     assign LED[4:0]  = (debug_phase == DBG_RUN) ? {{(5-RUN_W){1'b0}}, display_run_count} : 5'd0;
     assign LED[7:5]  = 3'b000;
     assign LED[8]    = (debug_phase == DBG_START);
-    assign LED[9]    = (debug_phase == DBG_DONE);
+    assign LED[9]    = done_latched;
     assign LED[10]   = (debug_phase == DBG_CLEAR_C);
     assign LED[11]   = (debug_phase == DBG_LOAD);
     assign LED[12]   = (debug_phase == DBG_CLEAR_ACC);
@@ -187,60 +202,46 @@ module nexys_a7_top #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rx_state            <= RX_WAIT_START;
-            cmd_byte            <= 8'd0;
-            arg0_byte           <= 8'd0;
-            arg1_byte           <= 8'd0;
-            pending_cmd_valid   <= 1'b0;
-            pending_cmd_byte    <= 8'd0;
-            pending_arg0_byte   <= 8'd0;
-            pending_arg1_byte   <= 8'd0;
-            core_start          <= 1'b0;
-            a_wr_en             <= 1'b0;
-            b_wr_en             <= 1'b0;
-            a_wr_addr           <= '0;
-            b_wr_addr           <= '0;
-            a_wr_data           <= '0;
-            b_wr_data           <= '0;
-            c_host_rd_addr      <= '0;
-            tx_data             <= 8'd0;
-            tx_start            <= 1'b0;
-            tx_req_data         <= 8'd0;
-            tx_req_valid        <= 1'b0;
-            start_latched       <= 1'b0;
-            done_latched        <= 1'b0;
-            cmd_accept_latched  <= 1'b0;
-            cmd_error_latched   <= 1'b0;
-            rx_activity_stretch <= 8'd0;
-            stream_state        <= STREAM_IDLE;
-            dump_index          <= '0;
-            dump_word           <= 32'sd0;
-            start_led_timer     <= 24'd0;
-            done_led_timer      <= 24'd0;
-            cmd_accept_led_timer <= 24'd0;
-            display_div_count   <= '0;
-            display_run_active  <= 1'b0;
-            display_run_count   <= '0;
-            debug_phase         <= DBG_IDLE;
+            rx_state              <= RX_WAIT_START;
+            cmd_byte              <= 8'd0;
+            addr_hi_byte          <= 8'd0;
+            addr_lo_byte          <= 8'd0;
+            data_byte             <= 8'd0;
+            pending_cmd_valid     <= 1'b0;
+            pending_cmd_byte      <= 8'd0;
+            pending_addr_hi_byte  <= 8'd0;
+            pending_addr_lo_byte  <= 8'd0;
+            pending_data_byte     <= 8'd0;
+            core_start            <= 1'b0;
+            requested_matrix_dim  <= '0;
+            a_wr_en               <= 1'b0;
+            b_wr_en               <= 1'b0;
+            a_wr_addr             <= '0;
+            b_wr_addr             <= '0;
+            a_wr_data             <= '0;
+            b_wr_data             <= '0;
+            c_host_rd_addr        <= '0;
+            tx_data               <= 8'd0;
+            tx_start              <= 1'b0;
+            tx_req_data           <= 8'd0;
+            tx_req_valid          <= 1'b0;
+            done_latched          <= 1'b0;
+            stream_state          <= STREAM_IDLE;
+            dump_index            <= '0;
+            dump_word             <= 32'sd0;
+            display_div_count     <= '0;
+            display_run_count     <= '0;
+            debug_phase           <= DBG_IDLE;
         end else begin
             core_start <= 1'b0;
             a_wr_en    <= 1'b0;
             b_wr_en    <= 1'b0;
             tx_start   <= 1'b0;
 
-            if (start_led_timer != 24'd0) begin
-                start_led_timer <= start_led_timer - 1'b1;
-            end
-            if (done_led_timer != 24'd0) begin
-                done_led_timer <= done_led_timer - 1'b1;
-            end
-            if (cmd_accept_led_timer != 24'd0) begin
-                cmd_accept_led_timer <= cmd_accept_led_timer - 1'b1;
-            end
-
             case (debug_phase)
                 DBG_IDLE: begin
                     display_div_count <= '0;
+                    display_run_count <= '0;
                 end
 
                 DBG_START: begin
@@ -317,15 +318,9 @@ module nexys_a7_top #(
                 tx_req_valid <= 1'b0;
             end
 
-            if (rx_valid) begin
-                rx_activity_stretch <= 8'hFF;
-            end else if (rx_activity_stretch != 8'd0) begin
-                rx_activity_stretch <= rx_activity_stretch - 1'b1;
-            end
-
             if (core_done) begin
                 done_latched <= 1'b1;
-                done_led_timer <= 24'hFFFFFF;
+                debug_phase  <= DBG_DONE;
             end
 
             if (rx_valid) begin
@@ -337,23 +332,30 @@ module nexys_a7_top #(
                     end
 
                     RX_WAIT_CMD: begin
-                        cmd_byte <= rx_data;
-                        rx_state <= RX_WAIT_ARG0;
+                        cmd_byte  <= rx_data;
+                        rx_state  <= RX_WAIT_AHI;
                     end
 
-                    RX_WAIT_ARG0: begin
-                        arg0_byte <= rx_data;
-                        rx_state  <= RX_WAIT_ARG1;
+                    RX_WAIT_AHI: begin
+                        addr_hi_byte <= rx_data;
+                        rx_state     <= RX_WAIT_ALO;
                     end
 
-                    RX_WAIT_ARG1: begin
-                        arg1_byte <= rx_data;
+                    RX_WAIT_ALO: begin
+                        addr_lo_byte <= rx_data;
+                        rx_state     <= RX_WAIT_DATA;
+                    end
+
+                    RX_WAIT_DATA: begin
+                        data_byte <= rx_data;
                         rx_state  <= RX_WAIT_START;
+
                         if (!pending_cmd_valid) begin
-                            pending_cmd_valid <= 1'b1;
-                            pending_cmd_byte  <= cmd_byte;
-                            pending_arg0_byte <= arg0_byte;
-                            pending_arg1_byte <= rx_data;
+                            pending_cmd_valid    <= 1'b1;
+                            pending_cmd_byte     <= cmd_byte;
+                            pending_addr_hi_byte <= addr_hi_byte;
+                            pending_addr_lo_byte <= addr_lo_byte;
+                            pending_data_byte    <= rx_data;
                         end
                     end
 
@@ -364,92 +366,70 @@ module nexys_a7_top #(
             end
 
             if (pending_cmd_valid && (stream_state == STREAM_IDLE) && !tx_busy && !tx_req_valid) begin
-                cmd_accept_latched <= 1'b0;
-                cmd_error_latched  <= 1'b0;
-                pending_cmd_valid  <= 1'b0;
+                pending_cmd_valid <= 1'b0;
 
                 case (pending_cmd_byte)
                     CMD_WRITE_A: begin
-                        if (!core_busy && (pending_arg0_byte < MATRIX_ELEMS)) begin
-                            a_wr_en            <= 1'b1;
-                            a_wr_addr          <= pending_arg0_byte[ADDRW-1:0];
-                            a_wr_data          <= $signed(pending_arg1_byte);
-                            tx_req_data        <= RESP_ACK;
-                            tx_req_valid       <= 1'b1;
-                            cmd_accept_latched <= 1'b1;
-                            cmd_accept_led_timer <= 24'h7FFFFF;
+                        if (!core_busy && (pending_word < MATRIX_ELEMS)) begin
+                            a_wr_en      <= 1'b1;
+                            a_wr_addr    <= pending_word[ADDRW-1:0];
+                            a_wr_data    <= $signed(pending_data_byte);
+                            tx_req_data  <= RESP_ACK;
+                            tx_req_valid <= 1'b1;
                         end else begin
-                            tx_req_data       <= RESP_ERROR;
-                            tx_req_valid      <= 1'b1;
-                            cmd_error_latched <= 1'b1;
+                            tx_req_data  <= RESP_ERROR;
+                            tx_req_valid <= 1'b1;
                         end
                     end
 
                     CMD_WRITE_B: begin
-                        if (!core_busy && (pending_arg0_byte < MATRIX_ELEMS)) begin
-                            b_wr_en            <= 1'b1;
-                            b_wr_addr          <= pending_arg0_byte[ADDRW-1:0];
-                            b_wr_data          <= $signed(pending_arg1_byte);
-                            tx_req_data        <= RESP_ACK;
-                            tx_req_valid       <= 1'b1;
-                            cmd_accept_latched <= 1'b1;
-                            cmd_accept_led_timer <= 24'h7FFFFF;
+                        if (!core_busy && (pending_word < MATRIX_ELEMS)) begin
+                            b_wr_en      <= 1'b1;
+                            b_wr_addr    <= pending_word[ADDRW-1:0];
+                            b_wr_data    <= $signed(pending_data_byte);
+                            tx_req_data  <= RESP_ACK;
+                            tx_req_valid <= 1'b1;
                         end else begin
-                            tx_req_data       <= RESP_ERROR;
-                            tx_req_valid      <= 1'b1;
-                            cmd_error_latched <= 1'b1;
+                            tx_req_data  <= RESP_ERROR;
+                            tx_req_valid <= 1'b1;
                         end
                     end
 
                     CMD_START: begin
-                        if (!core_busy) begin
-                            core_start         <= 1'b1;
-                            start_latched      <= 1'b1;
-                            done_latched       <= 1'b0;
-                            start_led_timer    <= 24'hFFFFFF;
-                            done_led_timer     <= 24'd0;
-                            display_run_active <= 1'b0;
-                            display_run_count  <= '0;
-                            display_div_count  <= '0;
-                            debug_phase        <= DBG_START;
-                            tx_req_data        <= RESP_ACK;
-                            tx_req_valid       <= 1'b1;
-                            cmd_accept_latched <= 1'b1;
-                            cmd_accept_led_timer <= 24'h7FFFFF;
+                        if (!core_busy && (pending_word >= 1) && (pending_word <= N)) begin
+                            core_start   <= 1'b1;
+                            requested_matrix_dim <= pending_word[DIM_W-1:0];
+                            done_latched <= 1'b0;
+                            debug_phase  <= DBG_START;
+                            tx_req_data  <= RESP_ACK;
+                            tx_req_valid <= 1'b1;
                         end else begin
-                            tx_req_data       <= RESP_ERROR;
-                            tx_req_valid      <= 1'b1;
-                            cmd_error_latched <= 1'b1;
+                            tx_req_data  <= RESP_ERROR;
+                            tx_req_valid <= 1'b1;
                         end
                     end
 
                     CMD_STATUS: begin
-                        tx_req_data        <= RESP_STATUS;
-                        tx_req_valid       <= 1'b1;
-                        stream_state       <= STREAM_STATUS_FLAGS;
-                        cmd_accept_latched <= 1'b1;
-                        cmd_accept_led_timer <= 24'h7FFFFF;
+                        tx_req_data  <= RESP_STATUS;
+                        tx_req_valid <= 1'b1;
+                        stream_state <= STREAM_STATUS_FLAGS;
                     end
 
                     CMD_DUMP_C: begin
-                        if (!core_busy) begin
-                            tx_req_data        <= RESP_DUMP;
-                            tx_req_valid       <= 1'b1;
-                            dump_index         <= '0;
-                            stream_state       <= STREAM_DUMP_DIM;
-                            cmd_accept_latched <= 1'b1;
-                            cmd_accept_led_timer <= 24'h7FFFFF;
+                        if (!core_busy && (active_matrix_dim != 0)) begin
+                            tx_req_data  <= RESP_DUMP;
+                            tx_req_valid <= 1'b1;
+                            dump_index   <= '0;
+                            stream_state <= STREAM_DUMP_DIM_HI;
                         end else begin
-                            tx_req_data       <= RESP_ERROR;
-                            tx_req_valid      <= 1'b1;
-                            cmd_error_latched <= 1'b1;
+                            tx_req_data  <= RESP_ERROR;
+                            tx_req_valid <= 1'b1;
                         end
                     end
 
                     default: begin
-                        tx_req_data       <= RESP_ERROR;
-                        tx_req_valid      <= 1'b1;
-                        cmd_error_latched <= 1'b1;
+                        tx_req_data  <= RESP_ERROR;
+                        tx_req_valid <= 1'b1;
                     end
                 endcase
             end else if (!tx_busy && !tx_req_valid) begin
@@ -460,23 +440,41 @@ module nexys_a7_top #(
                     STREAM_STATUS_FLAGS: begin
                         tx_req_data  <= {6'b0, done_latched, core_busy};
                         tx_req_valid <= 1'b1;
-                        stream_state <= STREAM_STATUS_HI;
+                        stream_state <= STREAM_STATUS_C3;
                     end
 
-                    STREAM_STATUS_HI: begin
+                    STREAM_STATUS_C3: begin
+                        tx_req_data  <= core_cycle_count[31:24];
+                        tx_req_valid <= 1'b1;
+                        stream_state <= STREAM_STATUS_C2;
+                    end
+
+                    STREAM_STATUS_C2: begin
+                        tx_req_data  <= core_cycle_count[23:16];
+                        tx_req_valid <= 1'b1;
+                        stream_state <= STREAM_STATUS_C1;
+                    end
+
+                    STREAM_STATUS_C1: begin
                         tx_req_data  <= core_cycle_count[15:8];
                         tx_req_valid <= 1'b1;
-                        stream_state <= STREAM_STATUS_LO;
+                        stream_state <= STREAM_STATUS_C0;
                     end
 
-                    STREAM_STATUS_LO: begin
+                    STREAM_STATUS_C0: begin
                         tx_req_data  <= core_cycle_count[7:0];
                         tx_req_valid <= 1'b1;
                         stream_state <= STREAM_IDLE;
                     end
 
-                    STREAM_DUMP_DIM: begin
-                        tx_req_data  <= N;
+                    STREAM_DUMP_DIM_HI: begin
+                        tx_req_data  <= active_dim_u16[15:8];
+                        tx_req_valid <= 1'b1;
+                        stream_state <= STREAM_DUMP_DIM_LO;
+                    end
+
+                    STREAM_DUMP_DIM_LO: begin
+                        tx_req_data  <= active_dim_u16[7:0];
                         tx_req_valid <= 1'b1;
                         stream_state <= STREAM_DUMP_SETADDR;
                     end
@@ -516,7 +514,7 @@ module nexys_a7_top #(
                     STREAM_DUMP_B0: begin
                         tx_req_data  <= dump_word[7:0];
                         tx_req_valid <= 1'b1;
-                        if (dump_index == (MATRIX_ELEMS - 1)) begin
+                        if (dump_index == dump_last_index[ADDRW-1:0]) begin
                             stream_state <= STREAM_IDLE;
                         end else begin
                             dump_index   <= dump_index + 1'b1;
