@@ -1,0 +1,57 @@
+<svg width="100%" viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Processing element internals</title>
+<desc>Single PE: a_in flows right to a_out, b_in flows down to b_out, multiplier feeds accumulator with clear_acc control.</desc>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+  <style>
+    text { font-family: sans-serif; fill: #2c2c2a; }
+    .th { font-size: 14px; font-weight: 600; }
+    .ts { font-size: 12px; }
+  </style>
+</defs>
+<!-- PE outer boundary -->
+<rect x="180" y="40" width="320" height="260" rx="14" fill="#faeeda" stroke="#854f0b" stroke-width="0.5"/>
+<text class="th" x="340" y="64" text-anchor="middle" dominant-baseline="central">pe.v — processing element</text>
+<!-- a_in -->
+<text class="ts" x="60" y="148" text-anchor="middle">a_in</text>
+<line x1="96" y1="148" x2="178" y2="148" stroke="#D85A30" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+<!-- a_out -->
+<line x1="502" y1="148" x2="574" y2="148" stroke="#D85A30" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+<text class="ts" x="608" y="148" text-anchor="middle">a_out</text>
+<!-- Horizontal pass-through -->
+<line x1="180" y1="148" x2="234" y2="148" stroke="#D85A30" stroke-width="1.5" fill="none"/>
+<line x1="278" y1="148" x2="502" y2="148" stroke="#D85A30" stroke-width="1.5" fill="none"/>
+<!-- b_in -->
+<text class="ts" x="340" y="24" text-anchor="middle">b_in</text>
+<line x1="340" y1="30" x2="340" y2="90" stroke="#378ADD" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+<!-- b_out -->
+<line x1="340" y1="230" x2="340" y2="286" stroke="#378ADD" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+<text class="ts" x="340" y="298" text-anchor="middle">b_out</text>
+<!-- Vertical pass-through -->
+<line x1="340" y1="90" x2="340" y2="116" stroke="#378ADD" stroke-width="1.5" fill="none"/>
+<line x1="340" y1="162" x2="340" y2="230" stroke="#378ADD" stroke-width="1.5" fill="none"/>
+<!-- Multiply unit -->
+<rect x="234" y="116" width="112" height="56" rx="8" fill="#faece7" stroke="#993c1d" stroke-width="0.5"/>
+<text class="th" x="290" y="138" text-anchor="middle" dominant-baseline="central">Multiply</text>
+<text class="ts" x="290" y="156" text-anchor="middle" dominant-baseline="central">a_in × b_in</text>
+<!-- Product arrow down -->
+<line x1="290" y1="172" x2="290" y2="204" stroke="#444441" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+<!-- Accumulate -->
+<rect x="234" y="208" width="112" height="46" rx="8" fill="#faece7" stroke="#993c1d" stroke-width="0.5"/>
+<text class="th" x="290" y="224" text-anchor="middle" dominant-baseline="central">Accumulate</text>
+<text class="ts" x="290" y="240" text-anchor="middle" dominant-baseline="central">acc += product</text>
+<!-- Feedback loop -->
+<path d="M234 231 L210 231 L210 178 L234 162" fill="none" stroke="#5f5e5a" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+<text class="ts" x="198" y="210" text-anchor="middle" transform="rotate(-90 198 210)">feedback</text>
+<!-- acc out -->
+<line x1="346" y1="231" x2="430" y2="231" stroke="#1D9E75" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+<text class="ts" x="476" y="235" text-anchor="middle">acc out</text>
+<!-- clear_acc -->
+<text class="ts" x="430" y="260" text-anchor="middle">clear_acc</text>
+<line x1="422" y1="266" x2="352" y2="248" stroke="#5f5e5a" stroke-width="1" stroke-dasharray="3 3" fill="none" marker-end="url(#arrow)"/>
+<!-- clk / en -->
+<text class="ts" x="206" y="274" text-anchor="middle">clk</text>
+<text class="ts" x="236" y="274" text-anchor="middle">en</text>
+</svg>

@@ -1,0 +1,56 @@
+<svg width="100%" viewBox="0 0 680 500" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Controller FSM</title>
+<desc>Seven-state FSM: ST_IDLE, ST_CLEAR_C, ST_LOAD, ST_CLEAR_ACC, ST_RUN, ST_WRITEBACK, ST_DONE with tile loop and async reset path.</desc>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+  <style>
+    text { font-family: sans-serif; fill: #2c2c2a; }
+    .th { font-size: 14px; font-weight: 600; }
+    .ts { font-size: 12px; }
+  </style>
+</defs>
+<!-- ST_IDLE -->
+<rect x="264" y="30" width="152" height="56" rx="8" fill="#f1efe8" stroke="#5f5e5a" stroke-width="0.5"/>
+<text class="th" x="340" y="52" text-anchor="middle" dominant-baseline="central">ST_IDLE</text>
+<text class="ts" x="340" y="70" text-anchor="middle" dominant-baseline="central">Waits for start</text>
+<line x1="340" y1="86" x2="340" y2="118" stroke="#444441" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text class="ts" x="358" y="106">start</text>
+<!-- ST_CLEAR_C -->
+<rect x="264" y="122" width="152" height="56" rx="8" fill="#e6f1fb" stroke="#185fa5" stroke-width="0.5"/>
+<text class="th" x="340" y="144" text-anchor="middle" dominant-baseline="central">ST_CLEAR_C</text>
+<text class="ts" x="340" y="162" text-anchor="middle" dominant-baseline="central">Zeros C BRAM</text>
+<line x1="340" y1="178" x2="340" y2="210" stroke="#444441" stroke-width="1.5" marker-end="url(#arrow)"/>
+<!-- ST_LOAD -->
+<rect x="264" y="214" width="152" height="56" rx="8" fill="#e1f5ee" stroke="#0f6e56" stroke-width="0.5"/>
+<text class="th" x="340" y="236" text-anchor="middle" dominant-baseline="central">ST_LOAD</text>
+<text class="ts" x="340" y="254" text-anchor="middle" dominant-baseline="central">Loads tile from BRAM</text>
+<line x1="340" y1="270" x2="340" y2="302" stroke="#444441" stroke-width="1.5" marker-end="url(#arrow)"/>
+<!-- ST_CLEAR_ACC -->
+<rect x="264" y="306" width="152" height="56" rx="8" fill="#e6f1fb" stroke="#185fa5" stroke-width="0.5"/>
+<text class="th" x="340" y="328" text-anchor="middle" dominant-baseline="central">ST_CLEAR_ACC</text>
+<text class="ts" x="340" y="346" text-anchor="middle" dominant-baseline="central">Clears PE accumulators</text>
+<line x1="416" y1="334" x2="490" y2="334" stroke="#444441" stroke-width="1.5" marker-end="url(#arrow)"/>
+<!-- ST_RUN -->
+<rect x="494" y="306" width="152" height="56" rx="8" fill="#faece7" stroke="#993c1d" stroke-width="0.5"/>
+<text class="th" x="570" y="328" text-anchor="middle" dominant-baseline="central">ST_RUN</text>
+<text class="ts" x="570" y="346" text-anchor="middle" dominant-baseline="central">Runs systolic array</text>
+<path d="M570 362 L570 400 L416 400" fill="none" stroke="#444441" stroke-width="1.5" marker-end="url(#arrow)"/>
+<!-- ST_WRITEBACK -->
+<rect x="264" y="374" width="152" height="56" rx="8" fill="#e1f5ee" stroke="#0f6e56" stroke-width="0.5"/>
+<text class="th" x="340" y="396" text-anchor="middle" dominant-baseline="central">ST_WRITEBACK</text>
+<text class="ts" x="340" y="414" text-anchor="middle" dominant-baseline="central">Writes PE acc to C BRAM</text>
+<!-- More tiles loop -->
+<path d="M264 402 L180 402 L180 242 L262 242" fill="none" stroke="#1D9E75" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+<text class="ts" x="140" y="322" text-anchor="middle" transform="rotate(-90 140 322)" fill="#0f6e56">more tiles</text>
+<!-- Arrow to ST_DONE -->
+<line x1="340" y1="430" x2="340" y2="454" stroke="#444441" stroke-width="1.5" marker-end="url(#arrow)"/>
+<!-- ST_DONE -->
+<rect x="264" y="458" width="152" height="44" rx="8" fill="#f1efe8" stroke="#5f5e5a" stroke-width="0.5"/>
+<text class="th" x="340" y="480" text-anchor="middle" dominant-baseline="central">ST_DONE</text>
+<!-- rst_n async reset path -->
+<text class="ts" x="52" y="48">rst_n low</text>
+<path d="M52 56 L52 470 L262 470" fill="none" stroke="#E24B4A" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+<text class="ts" x="38" y="300" text-anchor="middle" transform="rotate(-90 38 300)" fill="#A32D2D">async reset → ST_IDLE</text>
+</svg>
