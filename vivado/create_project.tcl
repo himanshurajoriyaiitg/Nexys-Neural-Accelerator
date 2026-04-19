@@ -16,17 +16,17 @@ add_files [list \
     [file join $project_root rtl a_bram.v] \
     [file join $project_root rtl b_bram.v] \
     [file join $project_root rtl c_bram.v] \
-    [file join $project_root rtl pe.v] \
-    [file join $project_root rtl systolic_array.v] \
-    [file join $project_root rtl controller.v] \
-    [file join $project_root rtl tpu_top.v] \
+    [file join $project_root rtl pe.sv] \
+    [file join $project_root rtl systolic_array.sv] \
+    [file join $project_root rtl controller.sv] \
+    [file join $project_root rtl tpu_top.sv] \
     [file join $project_root rtl uart_rx.v] \
     [file join $project_root rtl uart_tx.v] \
     [file join $project_root rtl nexys_a7_top.v] \
 ]
 
 add_files -fileset sim_1 [list \
-    [file join $project_root sim tb_tpu_top.v] \
+    [file join $project_root sim tb_tpu_top.sv] \
 ]
 
 add_files -fileset constrs_1 [list \
@@ -37,14 +37,14 @@ set rtl_files [get_files [list \
     [file join $project_root rtl a_bram.v] \
     [file join $project_root rtl b_bram.v] \
     [file join $project_root rtl c_bram.v] \
-    [file join $project_root rtl pe.v] \
-    [file join $project_root rtl systolic_array.v] \
-    [file join $project_root rtl controller.v] \
-    [file join $project_root rtl tpu_top.v] \
+    [file join $project_root rtl pe.sv] \
+    [file join $project_root rtl systolic_array.sv] \
+    [file join $project_root rtl controller.sv] \
+    [file join $project_root rtl tpu_top.sv] \
     [file join $project_root rtl uart_rx.v] \
     [file join $project_root rtl uart_tx.v] \
     [file join $project_root rtl nexys_a7_top.v] \
-    [file join $project_root sim tb_tpu_top.v] \
+    [file join $project_root sim tb_tpu_top.sv] \
 ]]
 set_property file_type SystemVerilog $rtl_files
 
