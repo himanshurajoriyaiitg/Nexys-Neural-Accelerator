@@ -5,17 +5,21 @@ module tpu_top #(
     parameter integer N       = `DEFAULT_MATRIX_N,
     parameter integer ARRAY_N = `DEFAULT_ARRAY_N,
     parameter integer DW      = `DEFAULT_DW,
+    parameter integer DIM_W   = ((N + 1) <= 1) ? 1 : $clog2(N + 1),
     parameter integer ACCW    = 2*DW + $clog2(N),
-    parameter integer ADDRW   = ((N*N) <= 1) ? 1 : $clog2(N*N)
+    parameter integer ADDRW   = ((N*N) <= 1) ? 1 : $clog2(N*N),
+    parameter integer RUN_W   = ((((3 * ARRAY_N) - 2) <= 1) ? 1 : $clog2((3 * ARRAY_N) - 2))
 )(
     input  wire                     clk,
     input  wire                     rst_n,
     input  wire                     start,
+    input  wire [DIM_W-1:0]         matrix_dim,
     output wire                     busy,
     output wire                     done,
     output reg  [31:0]              cycle_count,
     output wire                     debug_run_active,
     output wire [RUN_W-1:0]         debug_run_count,
+    output wire [DIM_W-1:0]         active_matrix_dim,
 
     input  wire                     a_wr_en,
     input  wire                     b_wr_en,
@@ -39,15 +43,14 @@ module tpu_top #(
         end
     endfunction
 
-    localparam integer TILE_COUNT   = (N + ARRAY_N - 1) / ARRAY_N;
-    localparam integer MATRIX_ELEMS = N * N;
-    localparam integer TILE_ELEMS   = ARRAY_N * ARRAY_N;
-    localparam integer MATRIX_ADDRW = clog2_safe(MATRIX_ELEMS);
-    localparam integer TILE_IDX_W   = clog2_safe(TILE_COUNT);
-    localparam integer LOCAL_IDX_W  = clog2_safe(ARRAY_N);
-    localparam integer LOAD_W       = clog2_safe(TILE_ELEMS + 1);
-    localparam integer RUN_W        = clog2_safe((3 * ARRAY_N) - 1);
-    localparam integer WB_W         = clog2_safe(TILE_ELEMS + 1);
+    localparam integer TILE_COUNT_MAX = (N + ARRAY_N - 1) / ARRAY_N;
+    localparam integer MATRIX_ELEMS   = N * N;
+    localparam integer TILE_ELEMS     = ARRAY_N * ARRAY_N;
+    localparam integer MATRIX_ADDRW   = clog2_safe(MATRIX_ELEMS);
+    localparam integer TILE_IDX_W     = clog2_safe(TILE_COUNT_MAX);
+    localparam integer LOCAL_IDX_W    = clog2_safe(ARRAY_N);
+    localparam integer LOAD_W         = clog2_safe(TILE_ELEMS + 1);
+    localparam integer WB_W           = clog2_safe(TILE_ELEMS + 1);
 
     wire clear_c_active;
     wire load_active;
@@ -55,13 +58,14 @@ module tpu_top #(
     wire clear_acc;
     wire run_en;
 
+    wire [DIM_W-1:0]       active_dim;
     wire [MATRIX_ADDRW-1:0] clear_c_addr;
-    wire [TILE_IDX_W-1:0]   tile_row;
-    wire [TILE_IDX_W-1:0]   tile_col;
-    wire [TILE_IDX_W-1:0]   tile_k;
-    wire [LOAD_W-1:0]       load_count;
-    wire [RUN_W-1:0]        run_count;
-    wire [WB_W-1:0]         wb_count;
+    wire [TILE_IDX_W-1:0]  tile_row;
+    wire [TILE_IDX_W-1:0]  tile_col;
+    wire [TILE_IDX_W-1:0]  tile_k;
+    wire [LOAD_W-1:0]      load_count;
+    wire [RUN_W-1:0]       run_count;
+    wire [WB_W-1:0]        wb_count;
 
     reg  [MATRIX_ADDRW-1:0] a_rd_addr;
     reg  [MATRIX_ADDRW-1:0] b_rd_addr;
@@ -110,11 +114,15 @@ module tpu_top #(
 
     controller #(
         .N       (N),
-        .ARRAY_N (ARRAY_N)
+        .ARRAY_N (ARRAY_N),
+        .DIM_W   (DIM_W),
+        .ADDRW   (MATRIX_ADDRW),
+        .RUN_W   (RUN_W)
     ) u_controller (
         .clk              (clk),
         .rst_n            (rst_n),
         .start            (start),
+        .matrix_dim       (matrix_dim),
         .clear_c_active   (clear_c_active),
         .load_active      (load_active),
         .writeback_active (writeback_active),
@@ -122,6 +130,7 @@ module tpu_top #(
         .run_en           (run_en),
         .busy             (busy),
         .done             (done),
+        .active_dim       (active_dim),
         .clear_c_addr     (clear_c_addr),
         .tile_row         (tile_row),
         .tile_col         (tile_col),
@@ -131,8 +140,9 @@ module tpu_top #(
         .wb_count         (wb_count)
     );
 
-    assign debug_run_active = run_en;
-    assign debug_run_count  = run_count;
+    assign active_matrix_dim = active_dim;
+    assign debug_run_active  = run_en;
+    assign debug_run_count   = run_count;
 
     a_bram #(
         .N     (N),
@@ -189,7 +199,7 @@ module tpu_top #(
         .b_in      (b_feed),
         .c_out     (partial_tile)
     );
-    
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             cycle_count <= 32'd0;
@@ -222,14 +232,14 @@ module tpu_top #(
             load_b_global_row = (tile_k   * ARRAY_N) + load_row_now;
             load_b_global_col = (tile_col * ARRAY_N) + load_col_now;
 
-            if ((load_a_global_row < N) && (load_a_global_col < N)) begin
+            if ((load_a_global_row < active_dim) && (load_a_global_col < active_dim)) begin
                 a_issue_valid = 1'b1;
-                a_rd_addr     = (load_a_global_row * N) + load_a_global_col;
+                a_rd_addr     = (load_a_global_row * active_dim) + load_a_global_col;
             end
 
-            if ((load_b_global_row < N) && (load_b_global_col < N)) begin
+            if ((load_b_global_row < active_dim) && (load_b_global_col < active_dim)) begin
                 b_issue_valid = 1'b1;
-                b_rd_addr     = (load_b_global_row * N) + load_b_global_col;
+                b_rd_addr     = (load_b_global_row * active_dim) + load_b_global_col;
             end
         end
     end
@@ -301,17 +311,17 @@ module tpu_top #(
             wb_global_row = (tile_row * ARRAY_N) + wb_row_now;
             wb_global_col = (tile_col * ARRAY_N) + wb_col_now;
 
-            if ((wb_global_row < N) && (wb_global_col < N)) begin
+            if ((wb_global_row < active_dim) && (wb_global_col < active_dim)) begin
                 c_issue_valid = 1'b1;
-                c_rd_addr     = (wb_global_row * N) + wb_global_col;
+                c_rd_addr     = (wb_global_row * active_dim) + wb_global_col;
             end
         end
     end
 
     always @(*) begin
-        c_wr_en      = 1'b0;
-        c_wr_addr    = '0;
-        c_wr_data    = '0;
+        c_wr_en        = 1'b0;
+        c_wr_addr      = '0;
+        c_wr_data      = '0;
         c_host_rd_data = c_rd_data;
 
         if (clear_c_active) begin
@@ -327,7 +337,7 @@ module tpu_top #(
 
     always @(*) begin
         for (feed_idx = 0; feed_idx < ARRAY_N; feed_idx = feed_idx + 1) begin
-            feed_delta     = run_count - feed_idx;
+            feed_delta       = run_count - feed_idx;
             a_feed[feed_idx] = '0;
             b_feed[feed_idx] = '0;
 
