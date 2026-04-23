@@ -22,6 +22,7 @@ set rtl_list [list \
     [file normalize [file join $project_root rtl a_bram.v]] \
     [file normalize [file join $project_root rtl b_bram.v]] \
     [file normalize [file join $project_root rtl c_bram.v]] \
+    [file normalize [file join $project_root rtl reset_sync.sv]] \
     [file normalize [file join $project_root rtl pe.sv]] \
     [file normalize [file join $project_root rtl systolic_array.sv]] \
     [file normalize [file join $project_root rtl controller.sv]] \
