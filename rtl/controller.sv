@@ -64,7 +64,6 @@ module controller #(
     output reg                     done,
 
     output reg [DIM_W-1:0]         active_dim,
-    output reg [ADDRW-1:0]         clear_c_addr,
     output reg [TILE_IDX_W-1:0]    tile_row,
     output reg [TILE_IDX_W-1:0]    tile_col,
     output reg [TILE_IDX_W-1:0]    tile_k,
@@ -79,6 +78,8 @@ module controller #(
     localparam [2:0] ST_IDLE      = 3'd0;
     localparam [2:0] ST_CLEAR_C   = 3'd1;
     localparam [2:0] ST_PRELOAD   = 3'd2;
+    localparam [2:0] ST_LOAD      = 3'd2;
+
     localparam [2:0] ST_CLEAR_ACC = 3'd3;
     localparam [2:0] ST_RUN       = 3'd4;
     localparam [2:0] ST_WAIT_LOAD = 3'd5;
@@ -183,8 +184,17 @@ module controller #(
 
     reg [2:0] state;
 
+    reg [ADDRW:0] active_matrix_elems;
+    reg [TILE_COUNT_W-1:0] active_tile_count;
+
+    wire start_valid;
+    wire [TILE_IDX_W-1:0] tile_last;
+
+    assign start_valid = (matrix_dim >= 1) && (matrix_dim <= N);
+    assign tile_last = active_tile_count - 1'b1;
+
     always @(*) begin
-        clear_c_active   = (state == ST_CLEAR_C);
+        clear_c_active   = 1'b0;
         load_active      = (state == ST_LOAD);
         writeback_active = (state == ST_WRITEBACK);
         clear_acc        = (state == ST_CLEAR_ACC);
@@ -239,9 +249,7 @@ module controller #(
         if (!rst_n) begin
             state               <= ST_IDLE;
             active_dim          <= '0;
-            active_matrix_elems <= '0;
             active_tile_count   <= '0;
-            clear_c_addr        <= '0;
             tile_row            <= '0;
             tile_col            <= '0;
             tile_k              <= '0;
@@ -270,6 +278,12 @@ module controller #(
                     next_load_k    <= '0;
                     load_pending   <= 1'b0;
                     buffer_ready   <= 2'b00;
+                    tile_row     <= '0;
+                    tile_col     <= '0;
+                    tile_k       <= '0;
+                    load_count   <= '0;
+                    run_count    <= '0;
+                    wb_count     <= '0;
 
 
                     if (start) begin
@@ -278,7 +292,7 @@ module controller #(
                         active_dim          <= matrix_dim;
                         active_matrix_elems <= matrix_dim * matrix_dim;
                         active_tile_count   <= (matrix_dim + ARRAY_N - 1) / ARRAY_N;
-                        state               <= ST_CLEAR_C;
+                        state               <= ST_LOAD;
                     end
                 end
 
