@@ -331,7 +331,9 @@ module tpu_top #(
         end else if (wb_meta_valid) begin
             c_wr_en   = 1'b1;
             c_wr_addr = wb_addr_d;
-            c_wr_data = c_rd_data + partial_tile[wb_row_d][wb_col_d];
+            c_wr_data = (tile_k == '0)
+                ? $signed(partial_tile[wb_row_d][wb_col_d])
+                : c_rd_data + partial_tile[wb_row_d][wb_col_d];
         end
     end
 
