@@ -7,6 +7,6 @@
 `define DEFAULT_ACCW      (2*`DEFAULT_DW + $clog2(`DEFAULT_MATRIX_N))
 
 `define DEFAULT_CLK_HZ     100_000_000
-`define DEFAULT_UART_BAUD  115200
+`define DEFAULT_UART_BAUD  921600
 
 `endif

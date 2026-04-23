@@ -4,7 +4,7 @@
 module uart_tx #(
     parameter integer CLK_HZ      = `DEFAULT_CLK_HZ,
     parameter integer BAUD        = `DEFAULT_UART_BAUD,
-    parameter integer CLKS_PER_BIT = CLK_HZ / BAUD
+    parameter integer CLKS_PER_BIT = (CLK_HZ + (BAUD / 2)) / BAUD
 )(
     input  wire       clk,
     input  wire       rst_n,
@@ -18,9 +18,10 @@ module uart_tx #(
     localparam [1:0] ST_START = 2'd1;
     localparam [1:0] ST_DATA  = 2'd2;
     localparam [1:0] ST_STOP  = 2'd3;
+    localparam integer COUNT_W = (CLKS_PER_BIT <= 1) ? 1 : $clog2(CLKS_PER_BIT);
 
     reg [1:0]  state;
-    reg [15:0] clk_count;
+    reg [COUNT_W-1:0] clk_count;
     reg [2:0]  bit_index;
     reg [7:0]  data_latched;
 

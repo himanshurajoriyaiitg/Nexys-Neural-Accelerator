@@ -4,7 +4,7 @@
 module uart_rx #(
     parameter integer CLK_HZ      = `DEFAULT_CLK_HZ,
     parameter integer BAUD        = `DEFAULT_UART_BAUD,
-    parameter integer CLKS_PER_BIT = CLK_HZ / BAUD
+    parameter integer CLKS_PER_BIT = (CLK_HZ + (BAUD / 2)) / BAUD
 )(
     input  wire       clk,
     input  wire       rst_n,
@@ -17,13 +17,14 @@ module uart_rx #(
     localparam [2:0] ST_START = 3'd1;
     localparam [2:0] ST_DATA  = 3'd2;
     localparam [2:0] ST_STOP  = 3'd3;
+    localparam integer COUNT_W = (CLKS_PER_BIT <= 1) ? 1 : $clog2(CLKS_PER_BIT);
 
     reg [2:0] state;
-    reg [15:0] clk_count;
+    reg [COUNT_W-1:0] clk_count;
     reg [2:0]  bit_index;
     reg [7:0]  data_shift;
-    reg        rx_meta;
-    reg        rx_sync;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg rx_meta;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg rx_sync;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

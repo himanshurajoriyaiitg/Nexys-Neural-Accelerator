@@ -12,10 +12,14 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <IOKit/serial/ioss.h>
+#endif
 #endif
 
 #define FRAME_START 0xA5
@@ -32,6 +36,7 @@
 
 #define MAX_RUNTIME_N 255
 #define MAX_MATRIX_ELEMS 65535u
+#define DEFAULT_UART_BAUD 921600
 
 struct options {
     const char *port;
@@ -59,8 +64,8 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s --port <serial> --random [--n 32] [--seed 1] [--out-dir fpga_output] [--verbose]\n"
-            "  %s --port <serial> --matrix-a <file> --matrix-b <file> [--n 32] [--out-dir fpga_output] [--verbose]\n",
+            "  %s --port <serial> --random [--n 32] [--seed 1] [--baud 921600] [--out-dir fpga_output] [--verbose]\n"
+            "  %s --port <serial> --matrix-a <file> --matrix-b <file> [--n 32] [--baud 921600] [--out-dir fpga_output] [--verbose]\n",
             prog, prog);
 }
 
@@ -96,7 +101,7 @@ static void parse_args(int argc, char **argv, struct options *opt)
 
     memset(opt, 0, sizeof(*opt));
     opt->n = 32;
-    opt->baud = 115200;
+    opt->baud = DEFAULT_UART_BAUD;
     opt->timeout_ms = 30000;
     opt->out_dir = "fpga_output";
 
@@ -274,7 +279,7 @@ static uint64_t monotonic_ms(void)
 #endif
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 static speed_t baud_to_termios(int baud)
 {
     switch (baud) {
@@ -283,7 +288,13 @@ static speed_t baud_to_termios(int baud)
         case 38400: return B38400;
         case 57600: return B57600;
         case 115200: return B115200;
-        default: fail_msg("Unsupported baud rate. Use 115200 for this project.");
+#ifdef B921600
+        case 921600: return B921600;
+#endif
+#ifdef B3000000
+        case 3000000: return B3000000;
+#endif
+        default: fail_msg("Unsupported baud rate on this platform.");
     }
     return B115200;
 }
@@ -357,10 +368,18 @@ static serial_handle_t serial_open(const char *port, int baud)
         fail("tcgetattr");
     }
 
-    speed = baud_to_termios(baud);
     cfmakeraw(&tty);
-    cfsetispeed(&tty, speed);
-    cfsetospeed(&tty, speed);
+#ifdef __APPLE__
+    speed = B115200;
+#else
+    speed = baud_to_termios(baud);
+#endif
+    if (cfsetispeed(&tty, speed) != 0) {
+        fail("cfsetispeed");
+    }
+    if (cfsetospeed(&tty, speed) != 0) {
+        fail("cfsetospeed");
+    }
     tty.c_cflag |= (CLOCAL | CREAD);
     tty.c_cflag &= ~CSTOPB;
     tty.c_cflag &= ~PARENB;
@@ -375,6 +394,15 @@ static serial_handle_t serial_open(const char *port, int baud)
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         fail("tcsetattr");
     }
+
+#ifdef __APPLE__
+    {
+        speed_t requested_baud = (speed_t)baud;
+        if (ioctl(fd, IOSSIOSPEED, &requested_baud) == -1) {
+            fail("IOSSIOSPEED");
+        }
+    }
+#endif
 
     tcflush(fd, TCIOFLUSH);
     sleep_ms(200);
