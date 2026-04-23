@@ -28,11 +28,23 @@ module nexys_a7_top #(
         end
     endfunction
 
+    function [1:0] low2;
+        input integer value;
+        begin
+            low2 = value[1:0];
+        end
+    endfunction
+
     localparam integer MATRIX_ELEMS = N * N;
     localparam integer ADDRW        = clog2_safe(MATRIX_ELEMS);
     localparam integer RUN_W        = clog2_safe((3 * ARRAY_N) - 1);
-    localparam integer DISPLAY_DIV  = CLK_HZ * 2;
-    localparam integer DISPLAY_W    = clog2_safe(DISPLAY_DIV);
+    localparam integer HEARTBEAT_W               = 27;
+    localparam integer ACTIVITY_LED_HOLD_CYCLES = CLK_HZ / 8;
+    localparam integer STAGE_LED_HOLD_CYCLES    = CLK_HZ / 2;
+    localparam integer LED_HOLD_CYCLES_MAX      =
+        (STAGE_LED_HOLD_CYCLES > ACTIVITY_LED_HOLD_CYCLES) ?
+        STAGE_LED_HOLD_CYCLES : ACTIVITY_LED_HOLD_CYCLES;
+    localparam integer LED_HOLD_W = clog2_safe(LED_HOLD_CYCLES_MAX + 1);
 
     localparam [7:0] FRAME_START = 8'hA5;
     localparam [7:0] CMD_WRITE_A = 8'h01;
@@ -68,19 +80,14 @@ module nexys_a7_top #(
     localparam [3:0] STREAM_DUMP_B1      = 4'd13;
     localparam [3:0] STREAM_DUMP_B0      = 4'd14;
 
-    localparam [2:0] DBG_IDLE      = 3'd0;
-    localparam [2:0] DBG_START     = 3'd1;
-    localparam [2:0] DBG_CLEAR_C   = 3'd2;
-    localparam [2:0] DBG_LOAD      = 3'd3;
-    localparam [2:0] DBG_CLEAR_ACC = 3'd4;
-    localparam [2:0] DBG_RUN       = 3'd5;
-    localparam [2:0] DBG_WRITEBACK = 3'd6;
-    localparam [2:0] DBG_DONE      = 3'd7;
-
     wire clk;
     wire rst_n;
     assign clk   = CLK100MHZ;
-    assign rst_n = CPU_RESETN;
+    reset_sync u_reset_sync (
+        .clk    (clk),
+        .arst_n (CPU_RESETN),
+        .rst_n  (rst_n)
+    );
 
     wire [7:0] rx_data;
     wire       rx_valid;
@@ -97,6 +104,15 @@ module nexys_a7_top #(
     wire [31:0]              core_cycle_count;
     wire                     core_run_active;
     wire [RUN_W-1:0]         core_run_count;
+    wire                     core_clear_c_active;
+    wire                     core_load_active;
+    wire                     core_writeback_active;
+    wire                     core_clear_acc;
+    wire                     core_buf_sel;
+    wire                     core_load_buf_sel;
+    wire [15:0]              core_load_count;
+    wire [15:0]              core_wb_count;
+    wire [15:0]              core_clear_c_addr;
     wire [DIM_W-1:0]         active_matrix_dim;
     wire [ADDRW:0]           active_matrix_elems;
 
@@ -124,20 +140,47 @@ module nexys_a7_top #(
     reg  [3:0]               stream_state;
     reg  [ADDRW-1:0]         dump_index;
     reg  signed [31:0]       dump_word;
-    reg  [DISPLAY_W-1:0]     display_div_count;
-    reg  [RUN_W-1:0]         display_run_count;
-    reg  [2:0]               debug_phase;
+    reg  [HEARTBEAT_W-1:0]   heartbeat_ctr;
+    reg  [LED_HOLD_W-1:0]    busy_led_hold;
+    reg  [LED_HOLD_W-1:0]    rx_led_hold;
+    reg  [LED_HOLD_W-1:0]    tx_led_hold;
+    reg  [LED_HOLD_W-1:0]    clear_c_led_hold;
+    reg  [LED_HOLD_W-1:0]    load_led_hold;
+    reg  [LED_HOLD_W-1:0]    clear_acc_led_hold;
+    reg  [LED_HOLD_W-1:0]    run_led_hold;
+    reg  [LED_HOLD_W-1:0]    writeback_led_hold;
+    reg  [3:0]               led_progress;
+    reg                      led_buf_sel;
+    reg                      led_load_buf_sel;
 
     wire [15:0] pending_word;
     wire [ADDRW:0] dump_last_index;
     wire [15:0] active_dim_u16;
+    wire        led_heartbeat;
+    wire        led_busy_seen;
+    wire        led_rx_seen;
+    wire        led_tx_seen;
+    wire        led_clear_c_seen;
+    wire        led_load_seen;
+    wire        led_clear_acc_seen;
+    wire        led_run_seen;
+    wire        led_writeback_seen;
 
     assign pending_word = {pending_addr_hi_byte, pending_addr_lo_byte};
     assign active_matrix_elems = active_matrix_dim * active_matrix_dim;
     assign dump_last_index = active_matrix_elems - 1'b1;
     assign active_dim_u16 = active_matrix_dim;
+    assign led_heartbeat = heartbeat_ctr[HEARTBEAT_W-1];
+    assign led_busy_seen = (busy_led_hold != 0);
+    assign led_rx_seen = (rx_led_hold != 0);
+    assign led_tx_seen = (tx_led_hold != 0);
+    assign led_clear_c_seen = (clear_c_led_hold != 0);
+    assign led_load_seen = (load_led_hold != 0);
+    assign led_clear_acc_seen = (clear_acc_led_hold != 0);
+    assign led_run_seen = (run_led_hold != 0);
+    assign led_writeback_seen = (writeback_led_hold != 0);
 
-    uart_rx #(
+     uart_rx #(
         .CLK_HZ (CLK_HZ),
         .BAUD   (UART_BAUD)
     ) u_uart_rx (
@@ -178,6 +221,15 @@ module nexys_a7_top #(
         .cycle_count      (core_cycle_count),
         .debug_run_active (core_run_active),
         .debug_run_count  (core_run_count),
+        .debug_clear_c_active(core_clear_c_active),
+        .debug_load_active(core_load_active),
+        .debug_writeback_active(core_writeback_active),
+        .debug_clear_acc  (core_clear_acc),
+        .debug_buf_sel    (core_buf_sel),
+        .debug_load_buf_sel(core_load_buf_sel),
+        .debug_load_count (core_load_count),
+        .debug_wb_count   (core_wb_count),
+        .debug_clear_c_addr(core_clear_c_addr),
         .active_matrix_dim(active_matrix_dim),
         .a_wr_en          (a_wr_en),
         .b_wr_en          (b_wr_en),
@@ -189,16 +241,19 @@ module nexys_a7_top #(
         .c_host_rd_data   (c_host_rd_data)
     );
 
-    assign LED[4:0]  = (debug_phase == DBG_RUN) ? {{(5-RUN_W){1'b0}}, display_run_count} : 5'd0;
-    assign LED[7:5]  = 3'b000;
-    assign LED[8]    = (debug_phase == DBG_START);
-    assign LED[9]    = done_latched;
-    assign LED[10]   = (debug_phase == DBG_CLEAR_C);
-    assign LED[11]   = (debug_phase == DBG_LOAD);
-    assign LED[12]   = (debug_phase == DBG_CLEAR_ACC);
-    assign LED[13]   = (debug_phase == DBG_RUN);
-    assign LED[14]   = (debug_phase == DBG_WRITEBACK);
-    assign LED[15]   = core_busy;
+    assign LED[3:0]   = led_progress;
+    assign LED[4]     = led_load_buf_sel;
+    assign LED[5]     = led_buf_sel;
+    assign LED[6]     = led_writeback_seen;
+    assign LED[7]     = led_run_seen;
+    assign LED[8]     = led_clear_acc_seen;
+    assign LED[9]     = led_load_seen;
+    assign LED[10]    = led_clear_c_seen;
+    assign LED[11]    = led_tx_seen;
+    assign LED[12]    = led_rx_seen;
+    assign LED[13]    = led_busy_seen;
+    assign LED[14]    = done_latched;
+    assign LED[15]    = led_heartbeat;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -229,101 +284,95 @@ module nexys_a7_top #(
             stream_state          <= STREAM_IDLE;
             dump_index            <= '0;
             dump_word             <= 32'sd0;
-            display_div_count     <= '0;
-            display_run_count     <= '0;
-            debug_phase           <= DBG_IDLE;
+            heartbeat_ctr         <= '0;
+            busy_led_hold         <= '0;
+            rx_led_hold           <= '0;
+            tx_led_hold           <= '0;
+            clear_c_led_hold      <= '0;
+            load_led_hold         <= '0;
+            clear_acc_led_hold    <= '0;
+            run_led_hold          <= '0;
+            writeback_led_hold    <= '0;
+            led_progress          <= 4'b0000;
+            led_buf_sel           <= 1'b0;
+            led_load_buf_sel      <= 1'b0;
         end else begin
             core_start <= 1'b0;
             a_wr_en    <= 1'b0;
             b_wr_en    <= 1'b0;
             tx_start   <= 1'b0;
+            heartbeat_ctr <= heartbeat_ctr + 1'b1;
 
-            case (debug_phase)
-                DBG_IDLE: begin
-                    display_div_count <= '0;
-                    display_run_count <= '0;
-                end
+            if (busy_led_hold != 0) begin
+                busy_led_hold <= busy_led_hold - 1'b1;
+            end
+            if (rx_led_hold != 0) begin
+                rx_led_hold <= rx_led_hold - 1'b1;
+            end
+            if (tx_led_hold != 0) begin
+                tx_led_hold <= tx_led_hold - 1'b1;
+            end
+            if (clear_c_led_hold != 0) begin
+                clear_c_led_hold <= clear_c_led_hold - 1'b1;
+            end
+            if (load_led_hold != 0) begin
+                load_led_hold <= load_led_hold - 1'b1;
+            end
+            if (clear_acc_led_hold != 0) begin
+                clear_acc_led_hold <= clear_acc_led_hold - 1'b1;
+            end
+            if (run_led_hold != 0) begin
+                run_led_hold <= run_led_hold - 1'b1;
+            end
+            if (writeback_led_hold != 0) begin
+                writeback_led_hold <= writeback_led_hold - 1'b1;
+            end
 
-                DBG_START: begin
-                    if (display_div_count == (DISPLAY_DIV - 1)) begin
-                        display_div_count <= '0;
-                        debug_phase       <= DBG_CLEAR_C;
-                    end else begin
-                        display_div_count <= display_div_count + 1'b1;
-                    end
-                end
-
-                DBG_CLEAR_C: begin
-                    if (display_div_count == (DISPLAY_DIV - 1)) begin
-                        display_div_count <= '0;
-                        debug_phase       <= DBG_LOAD;
-                    end else begin
-                        display_div_count <= display_div_count + 1'b1;
-                    end
-                end
-
-                DBG_LOAD: begin
-                    if (display_div_count == (DISPLAY_DIV - 1)) begin
-                        display_div_count <= '0;
-                        debug_phase       <= DBG_CLEAR_ACC;
-                    end else begin
-                        display_div_count <= display_div_count + 1'b1;
-                    end
-                end
-
-                DBG_CLEAR_ACC: begin
-                    if (display_div_count == (DISPLAY_DIV - 1)) begin
-                        display_div_count <= '0;
-                        debug_phase       <= DBG_RUN;
-                        display_run_count <= '0;
-                    end else begin
-                        display_div_count <= display_div_count + 1'b1;
-                    end
-                end
-
-                DBG_RUN: begin
-                    if (display_div_count == (DISPLAY_DIV - 1)) begin
-                        display_div_count <= '0;
-                        if (display_run_count == ((3 * ARRAY_N) - 3)) begin
-                            debug_phase <= DBG_WRITEBACK;
-                        end else begin
-                            display_run_count <= display_run_count + 1'b1;
-                        end
-                    end else begin
-                        display_div_count <= display_div_count + 1'b1;
-                    end
-                end
-
-                DBG_WRITEBACK: begin
-                    if (display_div_count == (DISPLAY_DIV - 1)) begin
-                        display_div_count <= '0;
-                        debug_phase       <= DBG_DONE;
-                    end else begin
-                        display_div_count <= display_div_count + 1'b1;
-                    end
-                end
-
-                DBG_DONE: begin
-                    display_div_count <= '0;
-                end
-
-                default: begin
-                    debug_phase <= DBG_IDLE;
-                end
-            endcase
+            if (core_busy) begin
+                busy_led_hold <= ACTIVITY_LED_HOLD_CYCLES - 1;
+            end
 
             if (tx_req_valid && !tx_busy) begin
                 tx_data      <= tx_req_data;
                 tx_start     <= 1'b1;
                 tx_req_valid <= 1'b0;
+                tx_led_hold  <= ACTIVITY_LED_HOLD_CYCLES - 1;
+            end
+
+            if (core_clear_c_active) begin
+                clear_c_led_hold <= STAGE_LED_HOLD_CYCLES - 1;
+                led_progress     <= 4'b0001 << low2(core_clear_c_addr);
+            end
+
+            if (core_load_active) begin
+                load_led_hold    <= STAGE_LED_HOLD_CYCLES - 1;
+                led_progress     <= 4'b0001 << low2(core_load_count);
+                led_load_buf_sel <= core_load_buf_sel;
             end
 
             if (core_done) begin
                 done_latched <= 1'b1;
-                debug_phase  <= DBG_DONE;
+                led_progress <= active_matrix_dim;
+            end
+
+            if (core_clear_acc) begin
+                clear_acc_led_hold <= STAGE_LED_HOLD_CYCLES - 1;
+                led_progress       <= 4'b1111;
+            end
+
+            if (core_run_active) begin
+                run_led_hold <= STAGE_LED_HOLD_CYCLES - 1;
+                led_progress <= 4'b0001 << low2(core_run_count);
+                led_buf_sel  <= core_buf_sel;
+            end
+
+            if (core_writeback_active) begin
+                writeback_led_hold <= STAGE_LED_HOLD_CYCLES - 1;
+                led_progress       <= 4'b0001 << low2(core_wb_count);
             end
 
             if (rx_valid) begin
+                rx_led_hold <= ACTIVITY_LED_HOLD_CYCLES - 1;
                 case (rx_state)
                     RX_WAIT_START: begin
                         if (rx_data == FRAME_START) begin
@@ -400,7 +449,6 @@ module nexys_a7_top #(
                             core_start   <= 1'b1;
                             requested_matrix_dim <= pending_word[DIM_W-1:0];
                             done_latched <= 1'b0;
-                            debug_phase  <= DBG_START;
                             tx_req_data  <= RESP_ACK;
                             tx_req_valid <= 1'b1;
                         end else begin
