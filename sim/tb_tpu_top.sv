@@ -187,12 +187,14 @@ module tb_tpu_top;
             depth = n * n;
             c_host_rd_addr = '0;
             @(posedge clk);
+            #1;
 
             for (idx = 0; idx < depth; idx = idx + 1) begin
                 mat_c_hw[idx] = c_host_rd_data;
                 if (idx != (depth - 1)) begin
                     c_host_rd_addr = idx + 1;
                     @(posedge clk);
+                    #1;
                 end
             end
 
