@@ -52,50 +52,50 @@ module tpu_top #(
     localparam integer LOAD_W         = clog2_safe(TILE_ELEMS + 1);
     localparam integer WB_W           = clog2_safe(TILE_ELEMS + 1);
 
-    wire clear_c_active;
-    wire load_active;
-    wire writeback_active;
-    wire clear_acc;
-    wire run_en;
+    wire                      clear_c_active;
+    wire                      load_active;
+    wire                      writeback_active;
+    wire                      clear_acc;
+    wire                      run_en;
+    wire                      ping_pong_flag;
+    wire                      load_buf_sel;
+    wire [DIM_W-1:0]          active_dim;
+    wire [MATRIX_ADDRW-1:0]   clear_c_addr;
+    wire [TILE_IDX_W-1:0]     tile_row;
+    wire [TILE_IDX_W-1:0]     tile_col;
+    wire [TILE_IDX_W-1:0]     tile_k;
+    wire [TILE_IDX_W-1:0]     load_tile_k;
+    wire [LOAD_W-1:0]         load_count;
+    wire [RUN_W-1:0]          run_count;
+    wire [WB_W-1:0]           wb_count;
 
-    wire [DIM_W-1:0]       active_dim;
-    wire [MATRIX_ADDRW-1:0] clear_c_addr;
-    wire [TILE_IDX_W-1:0]  tile_row;
-    wire [TILE_IDX_W-1:0]  tile_col;
-    wire [TILE_IDX_W-1:0]  tile_k;
-    wire [LOAD_W-1:0]      load_count;
-    wire [RUN_W-1:0]       run_count;
-    wire [WB_W-1:0]        wb_count;
+    reg  [MATRIX_ADDRW-1:0]   a_rd_addr;
+    reg  [MATRIX_ADDRW-1:0]   b_rd_addr;
+    reg  [MATRIX_ADDRW-1:0]   c_rd_addr;
+    wire signed [DW-1:0]      a_rd_data;
+    wire signed [DW-1:0]      b_rd_data;
+    wire signed [ACCW-1:0]    c_rd_data;
 
-    reg  [MATRIX_ADDRW-1:0] a_rd_addr;
-    reg  [MATRIX_ADDRW-1:0] b_rd_addr;
-    reg  [MATRIX_ADDRW-1:0] c_rd_addr;
-    wire signed [DW-1:0]    a_rd_data;
-    wire signed [DW-1:0]    b_rd_data;
-    wire signed [ACCW-1:0]  c_rd_data;
+    reg                       a_issue_valid;
+    reg                       b_issue_valid;
+    reg                       load_meta_valid;
+    reg                       load_a_valid_d;
+    reg                       load_b_valid_d;
+    reg  [LOCAL_IDX_W-1:0]    load_row_d;
+    reg  [LOCAL_IDX_W-1:0]    load_col_d;
+    reg                       load_buf_sel_d;
 
-    reg                     a_issue_valid;
-    reg                     b_issue_valid;
-    reg                     c_issue_valid;
-    reg                     load_meta_valid;
-    reg                     load_a_valid_d;
-    reg                     load_b_valid_d;
-    reg  [LOCAL_IDX_W-1:0]  load_row_d;
-    reg  [LOCAL_IDX_W-1:0]  load_col_d;
-    reg                     wb_meta_valid;
-    reg  [LOCAL_IDX_W-1:0]  wb_row_d;
-    reg  [LOCAL_IDX_W-1:0]  wb_col_d;
-    reg  [MATRIX_ADDRW-1:0] wb_addr_d;
+    reg                       c_wr_en;
+    reg  [MATRIX_ADDRW-1:0]   c_wr_addr;
+    reg  signed [ACCW-1:0]    c_wr_data;
 
-    reg                     c_wr_en;
-    reg  [MATRIX_ADDRW-1:0] c_wr_addr;
-    reg  signed [ACCW-1:0]  c_wr_data;
-
-    reg  signed [DW-1:0]    a_tile [0:ARRAY_N-1][0:ARRAY_N-1];
-    reg  signed [DW-1:0]    b_tile [0:ARRAY_N-1][0:ARRAY_N-1];
-    reg  signed [DW-1:0]    a_feed [0:ARRAY_N-1];
-    reg  signed [DW-1:0]    b_feed [0:ARRAY_N-1];
-    wire signed [ACCW-1:0]  partial_tile [0:ARRAY_N-1][0:ARRAY_N-1];
+    reg  signed [DW-1:0]      a_buf0 [0:ARRAY_N-1][0:ARRAY_N-1];
+    reg  signed [DW-1:0]      a_buf1 [0:ARRAY_N-1][0:ARRAY_N-1];
+    reg  signed [DW-1:0]      b_buf0 [0:ARRAY_N-1][0:ARRAY_N-1];
+    reg  signed [DW-1:0]      b_buf1 [0:ARRAY_N-1][0:ARRAY_N-1];
+    reg  signed [DW-1:0]      a_feed [0:ARRAY_N-1];
+    reg  signed [DW-1:0]      b_feed [0:ARRAY_N-1];
+    wire signed [ACCW-1:0]    partial_tile [0:ARRAY_N-1][0:ARRAY_N-1];
 
     integer load_row_now;
     integer load_col_now;
@@ -135,6 +135,9 @@ module tpu_top #(
         .tile_row         (tile_row),
         .tile_col         (tile_col),
         .tile_k           (tile_k),
+        .load_tile_k      (load_tile_k),
+        .ping_pong_flag   (ping_pong_flag),
+        .load_buf_sel     (load_buf_sel),
         .load_count       (load_count),
         .run_count        (run_count),
         .wb_count         (wb_count)
@@ -217,20 +220,19 @@ module tpu_top #(
         load_a_global_col = 0;
         load_b_global_row = 0;
         load_b_global_col = 0;
-
-        a_issue_valid = 1'b0;
-        b_issue_valid = 1'b0;
-        a_rd_addr     = '0;
-        b_rd_addr     = '0;
+        a_issue_valid     = 1'b0;
+        b_issue_valid     = 1'b0;
+        a_rd_addr         = '0;
+        b_rd_addr         = '0;
 
         if (load_active && (load_count < TILE_ELEMS)) begin
             load_row_now = load_count / ARRAY_N;
             load_col_now = load_count % ARRAY_N;
 
-            load_a_global_row = (tile_row * ARRAY_N) + load_row_now;
-            load_a_global_col = (tile_k   * ARRAY_N) + load_col_now;
-            load_b_global_row = (tile_k   * ARRAY_N) + load_row_now;
-            load_b_global_col = (tile_col * ARRAY_N) + load_col_now;
+            load_a_global_row = (tile_row    * ARRAY_N) + load_row_now;
+            load_a_global_col = (load_tile_k * ARRAY_N) + load_col_now;
+            load_b_global_row = (load_tile_k * ARRAY_N) + load_row_now;
+            load_b_global_col = (tile_col    * ARRAY_N) + load_col_now;
 
             if ((load_a_global_row < active_dim) && (load_a_global_col < active_dim)) begin
                 a_issue_valid = 1'b1;
@@ -251,21 +253,25 @@ module tpu_top #(
             load_b_valid_d  <= 1'b0;
             load_row_d      <= '0;
             load_col_d      <= '0;
-            wb_meta_valid   <= 1'b0;
-            wb_row_d        <= '0;
-            wb_col_d        <= '0;
-            wb_addr_d       <= '0;
+            load_buf_sel_d  <= 1'b0;
 
             for (row_idx = 0; row_idx < ARRAY_N; row_idx = row_idx + 1) begin
                 for (col_idx = 0; col_idx < ARRAY_N; col_idx = col_idx + 1) begin
-                    a_tile[row_idx][col_idx] <= '0;
-                    b_tile[row_idx][col_idx] <= '0;
+                    a_buf0[row_idx][col_idx] <= '0;
+                    a_buf1[row_idx][col_idx] <= '0;
+                    b_buf0[row_idx][col_idx] <= '0;
+                    b_buf1[row_idx][col_idx] <= '0;
                 end
             end
         end else begin
             if (load_active && (load_count > 0) && load_meta_valid) begin
-                a_tile[load_row_d][load_col_d] <= load_a_valid_d ? a_rd_data : '0;
-                b_tile[load_row_d][load_col_d] <= load_b_valid_d ? b_rd_data : '0;
+                if (load_buf_sel_d) begin
+                    a_buf1[load_row_d][load_col_d] <= load_a_valid_d ? a_rd_data : '0;
+                    b_buf1[load_row_d][load_col_d] <= load_b_valid_d ? b_rd_data : '0;
+                end else begin
+                    a_buf0[load_row_d][load_col_d] <= load_a_valid_d ? a_rd_data : '0;
+                    b_buf0[load_row_d][load_col_d] <= load_b_valid_d ? b_rd_data : '0;
+                end
             end
 
             if (load_active && (load_count < TILE_ELEMS)) begin
@@ -274,19 +280,11 @@ module tpu_top #(
                 load_b_valid_d  <= b_issue_valid;
                 load_row_d      <= load_row_now[LOCAL_IDX_W-1:0];
                 load_col_d      <= load_col_now[LOCAL_IDX_W-1:0];
+                load_buf_sel_d  <= load_buf_sel;
             end else begin
                 load_meta_valid <= 1'b0;
                 load_a_valid_d  <= 1'b0;
                 load_b_valid_d  <= 1'b0;
-            end
-
-            if (writeback_active && (wb_count < TILE_ELEMS)) begin
-                wb_meta_valid <= c_issue_valid;
-                wb_row_d      <= wb_row_now[LOCAL_IDX_W-1:0];
-                wb_col_d      <= wb_col_now[LOCAL_IDX_W-1:0];
-                wb_addr_d     <= c_rd_addr;
-            end else begin
-                wb_meta_valid <= 1'b0;
             end
         end
     end
@@ -297,28 +295,7 @@ module tpu_top #(
         wb_global_row = 0;
         wb_global_col = 0;
 
-        c_issue_valid = 1'b0;
-
-        if (writeback_active) begin
-            c_rd_addr = '0;
-        end else begin
-            c_rd_addr = c_host_rd_addr;
-        end
-
-        if (writeback_active && (wb_count < TILE_ELEMS)) begin
-            wb_row_now    = wb_count / ARRAY_N;
-            wb_col_now    = wb_count % ARRAY_N;
-            wb_global_row = (tile_row * ARRAY_N) + wb_row_now;
-            wb_global_col = (tile_col * ARRAY_N) + wb_col_now;
-
-            if ((wb_global_row < active_dim) && (wb_global_col < active_dim)) begin
-                c_issue_valid = 1'b1;
-                c_rd_addr     = (wb_global_row * active_dim) + wb_global_col;
-            end
-        end
-    end
-
-    always @(*) begin
+        c_rd_addr      = c_host_rd_addr;
         c_wr_en        = 1'b0;
         c_wr_addr      = '0;
         c_wr_data      = '0;
@@ -328,10 +305,17 @@ module tpu_top #(
             c_wr_en   = 1'b1;
             c_wr_addr = clear_c_addr;
             c_wr_data = '0;
-        end else if (wb_meta_valid) begin
-            c_wr_en   = 1'b1;
-            c_wr_addr = wb_addr_d;
-            c_wr_data = c_rd_data + partial_tile[wb_row_d][wb_col_d];
+        end else if (writeback_active && (wb_count < TILE_ELEMS)) begin
+            wb_row_now    = wb_count / ARRAY_N;
+            wb_col_now    = wb_count % ARRAY_N;
+            wb_global_row = (tile_row * ARRAY_N) + wb_row_now;
+            wb_global_col = (tile_col * ARRAY_N) + wb_col_now;
+
+            if ((wb_global_row < active_dim) && (wb_global_col < active_dim)) begin
+                c_wr_en   = 1'b1;
+                c_wr_addr = (wb_global_row * active_dim) + wb_global_col;
+                c_wr_data = partial_tile[wb_row_now][wb_col_now];
+            end
         end
     end
 
@@ -343,8 +327,13 @@ module tpu_top #(
 
             if (run_en) begin
                 if ((run_count >= feed_idx) && (feed_delta < ARRAY_N)) begin
-                    a_feed[feed_idx] = a_tile[feed_idx][feed_delta];
-                    b_feed[feed_idx] = b_tile[feed_delta][feed_idx];
+                    if (ping_pong_flag) begin
+                        a_feed[feed_idx] = a_buf1[feed_idx][feed_delta];
+                        b_feed[feed_idx] = b_buf1[feed_delta][feed_idx];
+                    end else begin
+                        a_feed[feed_idx] = a_buf0[feed_idx][feed_delta];
+                        b_feed[feed_idx] = b_buf0[feed_delta][feed_idx];
+                    end
                 end
             end
         end
