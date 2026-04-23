@@ -42,6 +42,7 @@ module controller #(
     output wire                    busy,
     output wire                    done,
 
+
     output reg  [DIM_W-1:0]        active_dim,
     output wire [ADDRW-1:0]        clear_c_addr,
     output reg  [TILE_IDX_W-1:0]   tile_row,
@@ -63,23 +64,25 @@ module controller #(
     output reg                     busy,
     output reg                     done,
 
-    output reg [DIM_W-1:0]         active_dim,
-    output reg [TILE_IDX_W-1:0]    tile_row,
-    output reg [TILE_IDX_W-1:0]    tile_col,
-    output reg [TILE_IDX_W-1:0]    tile_k,
-    output reg [TILE_IDX_W-1:0]    load_tile_k,
-    output reg                     ping_pong_flag,
+    output reg  [DIM_W-1:0]        active_dim,
+    output wire [ADDRW-1:0]        clear_c_addr,
+    output reg  [TILE_IDX_W-1:0]   tile_row,
+    output reg  [TILE_IDX_W-1:0]   tile_col,
+    output reg  [TILE_IDX_W-1:0]   tile_k,
+    output reg  [TILE_IDX_W-1:0]   load_tile_row,
+    output reg  [TILE_IDX_W-1:0]   load_tile_col,
+    output reg  [TILE_IDX_W-1:0]   load_tile_k,
+    output reg                     buf_sel,
     output reg                     load_buf_sel,
-    output reg [LOAD_W-1:0]        load_count,
-    output reg [RUN_W-1:0]         run_count,
-    output reg [WB_W-1:0]          wb_count
+    output reg  [LOAD_W-1:0]       load_count,
+    output reg  [RUN_W-1:0]        run_count,
+    output reg  [WB_W-1:0]         wb_count
 );
 
     localparam [2:0] ST_IDLE      = 3'd0;
     localparam [2:0] ST_CLEAR_C   = 3'd1;
     localparam [2:0] ST_PRELOAD   = 3'd2;
     localparam [2:0] ST_LOAD      = 3'd2;
-
     localparam [2:0] ST_CLEAR_ACC = 3'd3;
     localparam [2:0] ST_RUN       = 3'd4;
     localparam [2:0] ST_WAIT_LOAD = 3'd5;
@@ -216,9 +219,9 @@ module controller #(
             wb_count     <= '0;
     reg [ADDRW:0] active_matrix_elems;
     reg [TILE_COUNT_W-1:0] active_tile_count;
-    reg [TILE_IDX_W-1:0] next_load_k;
-    reg                  load_pending;
-    reg [1:0]            buffer_ready;
+    reg [TILE_IDX_W-1:0]   next_load_k;
+    reg                    load_pending;
+    reg [1:0]              buffer_ready;
 
     wire start_valid;
     wire [ADDRW:0] clear_c_last_ext;
@@ -244,27 +247,66 @@ module controller #(
         busy             = (state != ST_IDLE) && (state != ST_DONE);
         done             = (state == ST_DONE);
     end
+    wire                   start_valid;
+    wire                   have_tiles;
+    wire [TILE_IDX_W-1:0]  tile_last;
+    wire                   other_buf_ready;
+    wire                   other_buf_will_be_ready;
+    wire                   load_stream_ready;
+    wire                   next_output_valid;
+    wire [TILE_IDX_W-1:0]  next_output_row;
+    wire [TILE_IDX_W-1:0]  next_output_col;
+
+    assign start_valid = (matrix_dim >= 1) && (matrix_dim <= N);
+    assign have_tiles = (active_tile_count != 0);
+    assign tile_last = active_tile_count[TILE_IDX_W-1:0] - 1'b1;
+    assign clear_c_addr = '0;
+    assign clear_c_active = (state == ST_CLEAR_C);
+    assign load_active = (state == ST_PRELOAD) ||
+                         (state == ST_WAIT_LOAD) ||
+                         (((state == ST_RUN) || (state == ST_WRITEBACK)) && load_pending);
+    assign writeback_active = (state == ST_WRITEBACK);
+    assign clear_acc = (state == ST_CLEAR_ACC);
+    assign run_en = (state == ST_RUN);
+    assign busy = (state != ST_IDLE) && (state != ST_DONE);
+    assign done = (state == ST_DONE);
+    assign other_buf_ready = buf_sel ? buffer_ready[0] : buffer_ready[1];
+    assign other_buf_will_be_ready =
+        other_buf_ready || (load_pending &&
+                            (load_buf_sel == ~buf_sel) &&
+                            (load_count == TILE_ELEMS));
+    assign load_stream_ready =
+        buffer_ready[load_buf_sel] || (load_pending && (load_count == TILE_ELEMS));
+    assign next_output_valid =
+        have_tiles && ((tile_row != tile_last) || (tile_col != tile_last));
+    assign next_output_row =
+        (tile_col == tile_last) ? (tile_row + 1'b1) : tile_row;
+    assign next_output_col =
+        (tile_col == tile_last) ? {TILE_IDX_W{1'b0}} : (tile_col + 1'b1);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state               <= ST_IDLE;
-            active_dim          <= '0;
-            active_tile_count   <= '0;
-            tile_row            <= '0;
-            tile_col            <= '0;
-            tile_k              <= '0;
-            load_tile_k         <= '0;
-            ping_pong_flag      <= 1'b0;
-            load_buf_sel        <= 1'b0;
-            load_count          <= '0;
-            run_count           <= '0;
-            wb_count            <= '0;
-            next_load_k         <= '0;
-            load_pending        <= 1'b0;
-            buffer_ready        <= 2'b00;
+            state             <= ST_IDLE;
+            active_dim        <= '0;
+            active_tile_count <= '0;
+            tile_row          <= '0;
+            tile_col          <= '0;
+            tile_k            <= '0;
+            load_tile_row     <= '0;
+            load_tile_col     <= '0;
+            load_tile_k       <= '0;
+            buf_sel           <= 1'b0;
+            load_buf_sel      <= 1'b0;
+            load_count        <= '0;
+            run_count         <= '0;
+            wb_count          <= '0;
+            next_load_k       <= '0;
+            load_pending      <= 1'b0;
+            buffer_ready      <= 2'b00;
         end else begin
             case (state)
                 ST_IDLE: begin
+
                     clear_c_addr   <= '0;
                     tile_row       <= '0;
                     tile_col       <= '0;
@@ -285,14 +327,29 @@ module controller #(
                     run_count    <= '0;
                     wb_count     <= '0;
 
+                    tile_row      <= '0;
+                    tile_col      <= '0;
+                    tile_k        <= '0;
+                    load_tile_row <= '0;
+                    load_tile_col <= '0;
+                    load_tile_k   <= '0;
+                    buf_sel       <= 1'b0;
+                    load_buf_sel  <= 1'b0;
+                    load_count    <= '0;
+                    run_count     <= '0;
+                    wb_count      <= '0;
+                    next_load_k   <= '0;
+                    load_pending  <= 1'b0;
+                    buffer_ready  <= 2'b00;
+
+
 
                     if (start) begin
                         state <= ST_CLEAR_C;
                     if (start && start_valid) begin
-                        active_dim          <= matrix_dim;
-                        active_matrix_elems <= matrix_dim * matrix_dim;
-                        active_tile_count   <= (matrix_dim + ARRAY_N - 1) / ARRAY_N;
-                        state               <= ST_LOAD;
+                        active_dim        <= matrix_dim;
+                        active_tile_count <= (matrix_dim + ARRAY_N - 1) / ARRAY_N;
+                        state             <= ST_CLEAR_C;
                     end
                 end
 
@@ -340,13 +397,30 @@ module controller #(
                     end else begin
                         clear_c_addr <= clear_c_addr + 1'b1;
                     end
+                    tile_row      <= '0;
+                    tile_col      <= '0;
+                    tile_k        <= '0;
+                    load_tile_row <= '0;
+                    load_tile_col <= '0;
+                    load_tile_k   <= '0;
+                    buf_sel       <= 1'b0;
+                    load_buf_sel  <= 1'b0;
+                    load_count    <= '0;
+                    run_count     <= '0;
+                    wb_count      <= '0;
+                    next_load_k   <= '0;
+                    load_pending  <= 1'b0;
+                    buffer_ready  <= 2'b00;
+                    state         <= ST_PRELOAD;
                 end
 
                 ST_PRELOAD: begin
                     if (load_count == TILE_ELEMS) begin
+                        load_count <= '0;
                         buffer_ready[load_buf_sel] <= 1'b1;
-                        load_count                 <= '0;
-                        state                      <= ST_CLEAR_ACC;
+                        buf_sel    <= load_buf_sel;
+                        tile_k     <= load_tile_k;
+                        state      <= ST_CLEAR_ACC;
                     end else begin
                         load_count <= load_count + 1'b1;
                     end
@@ -443,21 +517,35 @@ module controller #(
                     tile_k         <= '0;
                     ping_pong_flag <= 1'b0;
                     run_count      <= '0;
+                    run_count <= '0;
 
                     if (active_tile_count > 1) begin
-                        load_pending    <= 1'b1;
-                        load_buf_sel    <= 1'b1;
-                        load_tile_k     <= 1;
-                        load_count      <= '0;
-                        buffer_ready[1] <= 1'b0;
+                        load_pending           <= 1'b1;
+                        load_buf_sel           <= ~buf_sel;
+                        load_tile_row          <= tile_row;
+                        load_tile_col          <= tile_col;
+                        load_tile_k            <= tile_k + 1'b1;
+                        load_count             <= '0;
+                        buffer_ready[~buf_sel] <= 1'b0;
+
                         if (active_tile_count > 2) begin
                             next_load_k <= 2;
                         end else begin
                             next_load_k <= active_tile_count[TILE_IDX_W-1:0];
                         end
+                    end else if (next_output_valid) begin
+                        load_pending           <= 1'b1;
+                        load_buf_sel           <= ~buf_sel;
+                        load_tile_row          <= next_output_row;
+                        load_tile_col          <= next_output_col;
+                        load_tile_k            <= '0;
+                        load_count             <= '0;
+                        buffer_ready[~buf_sel] <= 1'b0;
+                        next_load_k            <= active_tile_count[TILE_IDX_W-1:0];
                     end else begin
                         load_pending <= 1'b0;
                         load_count   <= '0;
+                        next_load_k  <= active_tile_count[TILE_IDX_W-1:0];
                     end
 
                     state <= ST_RUN;
@@ -479,32 +567,37 @@ module controller #(
 
                         if (tile_k == tile_last) begin
                             wb_count <= '0;
-                            state    <= ST_WRITEBACK;
-                        end else if (other_buf_will_be_ready) begin
-                            if (ping_pong_flag) begin
-                                ping_pong_flag <= 1'b0;
-                            end else begin
-                                ping_pong_flag <= 1'b1;
-                            end
 
-                            tile_k <= tile_k + 1'b1;
-
-                            if (next_load_k <= tile_last) begin
-                                load_pending <= 1'b1;
-                                load_buf_sel <= ping_pong_flag;
-                                load_tile_k  <= next_load_k;
-                                load_count   <= '0;
-                                buffer_ready[ping_pong_flag] <= 1'b0;
-                                next_load_k  <= next_load_k + 1'b1;
-                            end else begin
+                            if (!next_output_valid) begin
                                 load_pending <= 1'b0;
                                 load_count   <= '0;
                             end
 
-                            if (ping_pong_flag) begin
-                                buffer_ready[0] <= 1'b1;
+                            state <= ST_WRITEBACK;
+                        end else if (other_buf_will_be_ready) begin
+                            buf_sel <= ~buf_sel;
+                            tile_k  <= tile_k + 1'b1;
+
+                            if (next_load_k <= tile_last) begin
+                                load_pending          <= 1'b1;
+                                load_buf_sel          <= buf_sel;
+                                load_tile_row         <= tile_row;
+                                load_tile_col         <= tile_col;
+                                load_tile_k           <= next_load_k;
+                                load_count            <= '0;
+                                buffer_ready[buf_sel] <= 1'b0;
+                                next_load_k           <= next_load_k + 1'b1;
+                            end else if (((tile_k + 1'b1) == tile_last) && next_output_valid) begin
+                                load_pending          <= 1'b1;
+                                load_buf_sel          <= buf_sel;
+                                load_tile_row         <= next_output_row;
+                                load_tile_col         <= next_output_col;
+                                load_tile_k           <= '0;
+                                load_count            <= '0;
+                                buffer_ready[buf_sel] <= 1'b0;
                             end else begin
-                                buffer_ready[1] <= 1'b1;
+                                load_pending <= 1'b0;
+                                load_count   <= '0;
                             end
                         end else begin
                             state <= ST_WAIT_LOAD;
@@ -552,11 +645,22 @@ module controller #(
                             tile_k <= tile_k + 1'b1;
 
                             if (next_load_k <= tile_last) begin
-                                load_pending <= 1'b1;
-                                load_buf_sel <= ping_pong_flag;
-                                load_tile_k  <= next_load_k;
-                                buffer_ready[ping_pong_flag] <= 1'b0;
-                                next_load_k  <= next_load_k + 1'b1;
+                                load_pending          <= 1'b1;
+                                load_buf_sel          <= buf_sel;
+                                load_tile_row         <= tile_row;
+                                load_tile_col         <= tile_col;
+                                load_tile_k           <= next_load_k;
+                                load_count            <= '0;
+                                buffer_ready[buf_sel] <= 1'b0;
+                                next_load_k           <= next_load_k + 1'b1;
+                            end else if (((tile_k + 1'b1) == tile_last) && next_output_valid) begin
+                                load_pending          <= 1'b1;
+                                load_buf_sel          <= buf_sel;
+                                load_tile_row         <= next_output_row;
+                                load_tile_col         <= next_output_col;
+                                load_tile_k           <= '0;
+                                load_count            <= '0;
+                                buffer_ready[buf_sel] <= 1'b0;
                             end
 
                             state <= ST_RUN;
@@ -644,15 +748,34 @@ module controller #(
                         if (tile_col == tile_last) begin
                             tile_col <= '0;
 
-                            if (tile_row == tile_last) begin
-                                state <= ST_DONE;
+                    if (wb_count == (TILE_ELEMS - 1)) begin
+                        wb_count    <= '0;
+                        tile_k      <= '0;
+                        run_count   <= '0;
+                        next_load_k <= '0;
+
+                        if (next_output_valid) begin
+                            tile_row      <= next_output_row;
+                            tile_col      <= next_output_col;
+                            load_tile_row <= next_output_row;
+                            load_tile_col <= next_output_col;
+                            load_tile_k   <= '0;
+                            buf_sel       <= load_buf_sel;
+
+                            if (load_stream_ready) begin
+                                buffer_ready[load_buf_sel] <= 1'b1;
+                                load_pending               <= 1'b0;
+                                load_count                 <= '0;
+                                state                      <= ST_CLEAR_ACC;
                             end else begin
-                                tile_row <= tile_row + 1'b1;
-                                state    <= ST_PRELOAD;
+                                load_pending <= 1'b0;
+                                state        <= ST_PRELOAD;
                             end
                         end else begin
-                            tile_col <= tile_col + 1'b1;
-                            state    <= ST_PRELOAD;
+                            load_pending <= 1'b0;
+                            load_count   <= '0;
+                            buffer_ready <= 2'b00;
+                            state        <= ST_DONE;
                         end
                     end else begin
                         wb_count <= wb_count + 1'b1;
