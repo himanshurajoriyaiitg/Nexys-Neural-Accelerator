@@ -121,7 +121,7 @@ module controller #(
                 end
 
                 ST_WRITEBACK: begin
-                    if (wb_count == TILE_ELEMS) begin
+                    if (wb_count == TILE_ELEMS+1) begin
                         wb_count <= '0;
 
                         if (tile_k == tile_last) begin
