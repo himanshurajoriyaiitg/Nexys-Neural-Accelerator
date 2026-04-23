@@ -21,7 +21,6 @@ module controller #(
     input  wire                    start,
     input  wire [DIM_W-1:0]        matrix_dim,
 
-    output reg                     clear_c_active,
     output reg                     load_active,
     output reg                     writeback_active,
     output reg                     clear_acc,
@@ -56,7 +55,6 @@ module controller #(
     assign tile_last = active_tile_count - 1'b1;
 
     always @(*) begin
-        clear_c_active   = 1'b0;
         load_active      = (state == ST_LOAD);
         writeback_active = (state == ST_WRITEBACK);
         clear_acc        = (state == ST_CLEAR_ACC);
