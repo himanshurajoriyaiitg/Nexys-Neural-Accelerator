@@ -52,14 +52,12 @@ module tpu_top #(
     localparam integer LOAD_W         = clog2_safe(TILE_ELEMS + 1);
     localparam integer WB_W           = clog2_safe(TILE_ELEMS + 1);
 
-    wire clear_c_active;
     wire load_active;
     wire writeback_active;
     wire clear_acc;
     wire run_en;
 
     wire [DIM_W-1:0]       active_dim;
-    wire [MATRIX_ADDRW-1:0] clear_c_addr;
     wire [TILE_IDX_W-1:0]  tile_row;
     wire [TILE_IDX_W-1:0]  tile_col;
     wire [TILE_IDX_W-1:0]  tile_k;
@@ -86,6 +84,11 @@ module tpu_top #(
     reg  [LOCAL_IDX_W-1:0]  wb_row_d;
     reg  [LOCAL_IDX_W-1:0]  wb_col_d;
     reg  [MATRIX_ADDRW-1:0] wb_addr_d;
+
+    reg                     wb_meta_valid_dd;
+    reg  [LOCAL_IDX_W-1:0]  wb_row_dd;
+    reg  [LOCAL_IDX_W-1:0]  wb_col_dd;
+    reg  [MATRIX_ADDRW-1:0] wb_addr_dd;
 
     reg                     c_wr_en;
     reg  [MATRIX_ADDRW-1:0] c_wr_addr;
@@ -123,7 +126,6 @@ module tpu_top #(
         .rst_n            (rst_n),
         .start            (start),
         .matrix_dim       (matrix_dim),
-        .clear_c_active   (clear_c_active),
         .load_active      (load_active),
         .writeback_active (writeback_active),
         .clear_acc        (clear_acc),
@@ -131,7 +133,6 @@ module tpu_top #(
         .busy             (busy),
         .done             (done),
         .active_dim       (active_dim),
-        .clear_c_addr     (clear_c_addr),
         .tile_row         (tile_row),
         .tile_col         (tile_col),
         .tile_k           (tile_k),
@@ -251,6 +252,10 @@ module tpu_top #(
             load_b_valid_d  <= 1'b0;
             load_row_d      <= '0;
             load_col_d      <= '0;
+            wb_meta_valid_dd <= 1'b0;
+            wb_row_dd        <= '0;
+            wb_col_dd        <= '0;
+            wb_addr_dd       <= '0;
             wb_meta_valid   <= 1'b0;
             wb_row_d        <= '0;
             wb_col_d        <= '0;
@@ -288,6 +293,10 @@ module tpu_top #(
             end else begin
                 wb_meta_valid <= 1'b0;
             end
+            wb_meta_valid_dd <= wb_meta_valid;
+            wb_row_dd        <= wb_row_d;
+            wb_col_dd        <= wb_col_d;
+            wb_addr_dd       <= wb_addr_d;
         end
     end
 
@@ -323,17 +332,12 @@ module tpu_top #(
         c_wr_addr      = '0;
         c_wr_data      = '0;
         c_host_rd_data = c_rd_data;
-
-        if (clear_c_active) begin
+        if (wb_meta_valid_dd) begin
             c_wr_en   = 1'b1;
-            c_wr_addr = clear_c_addr;
-            c_wr_data = '0;
-        end else if (wb_meta_valid) begin
-            c_wr_en   = 1'b1;
-            c_wr_addr = wb_addr_d;
+            c_wr_addr = wb_addr_dd;
             c_wr_data = (tile_k == '0)
-                ? $signed(partial_tile[wb_row_d][wb_col_d])
-                : c_rd_data + partial_tile[wb_row_d][wb_col_d];
+                ? $signed(partial_tile[wb_row_dd][wb_col_dd])
+                : c_rd_data + partial_tile[wb_row_dd][wb_col_dd];
         end
     end
 
