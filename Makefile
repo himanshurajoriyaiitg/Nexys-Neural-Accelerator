@@ -13,7 +13,7 @@ BATCH_DIR := batch_files
 endif
 
 PORT ?= COM5
-N ?= 8
+N ?= 32
 SEED ?= 1
 MATRIX_A ?= input_a.txt
 MATRIX_B ?= input_b.txt
@@ -32,7 +32,7 @@ help:
 	@echo.
 	@echo Useful variables:
 	@echo   PORT=COM5
-	@echo   N=8
+	@echo   N=32
 	@echo   SEED=1
 	@echo   MATRIX_A=input_a.txt MATRIX_B=input_b.txt
 

@@ -9,7 +9,7 @@ set PORT=%1
 set MATRIX_A=%2
 set MATRIX_B=%3
 set N=%4
-if "%N%"=="" set N=8
+if "%N%"=="" set N=32
 
 if not exist tools\uart_host.exe (
     call "%~dp0build_host.bat"
