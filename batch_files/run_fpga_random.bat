@@ -8,7 +8,7 @@ if "%1"=="" (
 set PORT=%1
 set N=%2
 set SEED=%3
-if "%N%"=="" set N=8
+if "%N%"=="" set N=32
 if "%SEED%"=="" set SEED=1
 
 if not exist tools\uart_host.exe (
