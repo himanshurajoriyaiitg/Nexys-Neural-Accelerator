@@ -219,20 +219,23 @@ project_root/
 
 ### Simulation
 
-**Step 1 — Open the project in Vivado:**
+**Step 1 :clone the repository   in your system**
 
 ```
-batch_files\open_vivado.bat
+git clone https://github.com/himanshurajoriyaiitg/TPU_systolic_array.git
 ```
 
-**Step 2 — Run the testbench** (Vivado Simulator or Questa). Output files are written to `sim/output/`.
+**Step 2 — Run the terminal in TPU_systolic_array/  .
 
-**Step 3 — Verify simulation result:**
+**Step 3 — run the command make vivado in terminal to make the vivado project **
 
 ```
-batch_files\check_sim.bat
+ make vivado
 ```
-
+**Step 4 — run the behavioural simulation in vivado and to know that the simulation is correct  run the command  **
+```
+make check-sim
+```
 Expected output:
 
 ```
@@ -246,27 +249,27 @@ PASS: 8x8 matrix multiply matches software reference.
 **Step 1 — Build the host program** (requires MSVC `cl` or MinGW `gcc`):
 
 ```
-batch_files\build_host.bat
+make host 
 ```
 
-**Step 2 — Synthesize and program** the Nexys A7 from Vivado.
+**Step 2 — Synthesize and program** the Nexys A7 from Vivado, generate the bitstream and program  the fpga.
 
-**Step 3 — Run with random matrices** (replace `COM5` with your port):
+**Step 3 — Run with random matrices** (replace `COM5` with your port and the N with the respective size of matrices):
 
 ```
-batch_files\run_fpga_random.bat COM5 8 42
+ .\tools\uart_host.exe --port COM8 --random --n 32 --seed 1 --out-dir fpga_output --verbose
 ```
 
 Or run with your own matrix files:
 
 ```
-batch_files\run_fpga_files.bat COM5 my_a.txt my_b.txt 8
+make fpga-files PORT=COM8 MATRIX_A=input_a.txt MATRIX_B=input_b.txt N=32 
 ```
 
 **Step 4 — Verify FPGA result:**
 
 ```
-batch_files\check_fpga.bat
+ make check-fpga
 ```
 
 Expected output:
@@ -277,19 +280,23 @@ PASS: 8x8 matrix multiply matches software reference.
 
 ---
 
-## LED Status Map
+## LED Status Map on fpga board 
 
-| LED        | Signal                | Meaning                                 |
-| ---------- | --------------------- | --------------------------------------- |
-| `LED[7:0]` | `cycle_count[7:0]`    | Low 8 bits of hardware cycle counter    |
-| `LED[8]`   | start latched         | START command was received              |
-| `LED[9]`   | done latched          | Computation finished                    |
-| `LED[10]`  | core busy             | Core is actively computing              |
-| `LED[11]`  | last command accepted | Most recent UART command was valid      |
-| `LED[12]`  | stream active         | Dump stream in progress                 |
-| `LED[13]`  | last command error    | Most recent UART command returned ERROR |
-| `LED[14]`  | UART RX activity      | Byte being received                     |
-| `LED[15]`  | UART TX busy          | Byte being transmitted                  |
+| LED        | Signal               |
+| ---------- | --------------------- | 
+| `LED[3:0]` | progress pattern     | 
+| `LED[4]`   | load buffer select     | 
+| `LED[5]`   | compute buffer select    | 
+| `LED[6]`  |  write back stage seen  | 
+| `LED[7]`  | run stage seen | 
+| `LED[8]`  | clear-acc stage seen  | 
+| `LED[9]`  | load stage seen         | 
+| `LED[10]`  | clear -c stage seen    | 
+| `LED[11]`  | UART TX avtiviy  |
+| `LED[12]`  | UART RX avtiviy       | 
+| `LED[13]`  | busy     | 
+| `LED[14]`  | done              |
+| `LED[15]`  | heartbeat         | 
 
 ---
 
