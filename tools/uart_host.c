@@ -306,6 +306,7 @@ static serial_handle_t serial_open(const char *port, int baud)
     HANDLE handle;
     DCB dcb;
     COMMTIMEOUTS timeouts;
+    const DWORD serial_buffer_bytes = 1u << 16;
     char full_port[64];
 
     if (strncmp(port, "\\\\.\\", 4) == 0) {
@@ -340,6 +341,9 @@ static serial_handle_t serial_open(const char *port, int baud)
     if (!SetCommState(handle, &dcb)) {
         fail_msg("SetCommState failed.");
     }
+
+    /* Give the USB-UART driver enough headroom for sustained matrix dumps. */
+    SetupComm(handle, serial_buffer_bytes, serial_buffer_bytes);
 
     memset(&timeouts, 0, sizeof(timeouts));
     timeouts.ReadIntervalTimeout = 20;
@@ -581,6 +585,7 @@ static void dump_matrix_c(serial_handle_t handle, int32_t *mat, int n, int timeo
     uint16_t idx;
     uint16_t elems = (uint16_t)(n * n);
     uint16_t returned_n;
+    uint16_t log_step = (elems >= 256u) ? 256u : 32u;
 
     send_frame(handle, CMD_DUMP_C, 0, 0);
     read_exact(handle, header, sizeof(header), timeout_ms, "dump header");
@@ -606,7 +611,7 @@ static void dump_matrix_c(serial_handle_t handle, int32_t *mat, int n, int timeo
                              ((uint32_t)raw[1] << 16) |
                              ((uint32_t)raw[2] << 8)  |
                              ((uint32_t)raw[3]));
-        if (verbose && ((idx % 32u) == 0u)) {
+        if (verbose && (((idx % log_step) == 0u) || (idx == (uint16_t)(elems - 1u)))) {
             printf("Dumped C index %u/%u\n", (unsigned int)idx, (unsigned int)(elems - 1u));
             fflush(stdout);
         }
