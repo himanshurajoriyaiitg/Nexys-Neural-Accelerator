@@ -39,12 +39,15 @@ module nexys_a7_top #(
     localparam integer ADDRW        = clog2_safe(MATRIX_ELEMS);
     localparam integer RUN_W        = clog2_safe((3 * ARRAY_N) - 1);
     localparam integer HEARTBEAT_W               = 27;
-    localparam integer ACTIVITY_LED_HOLD_CYCLES = CLK_HZ / 8;
-    localparam integer STAGE_LED_HOLD_CYCLES    = CLK_HZ / 2;
+    localparam integer ACTIVITY_LED_HOLD_CYCLES = CLK_HZ;
+    localparam integer STAGE_LED_HOLD_CYCLES    = CLK_HZ * 2;
+    localparam integer LED_PROGRESS_STEP_CYCLES =
+        (CLK_HZ / 4) > 0 ? (CLK_HZ / 4) : 1;
     localparam integer LED_HOLD_CYCLES_MAX      =
         (STAGE_LED_HOLD_CYCLES > ACTIVITY_LED_HOLD_CYCLES) ?
         STAGE_LED_HOLD_CYCLES : ACTIVITY_LED_HOLD_CYCLES;
     localparam integer LED_HOLD_W = clog2_safe(LED_HOLD_CYCLES_MAX + 1);
+    localparam integer LED_PROGRESS_W = clog2_safe(LED_PROGRESS_STEP_CYCLES);
 
     localparam [7:0] FRAME_START = 8'hA5;
     localparam [7:0] CMD_WRITE_A = 8'h01;
@@ -150,6 +153,7 @@ module nexys_a7_top #(
     reg  [LED_HOLD_W-1:0]    run_led_hold;
     reg  [LED_HOLD_W-1:0]    writeback_led_hold;
     reg  [3:0]               led_progress;
+    reg  [LED_PROGRESS_W-1:0] led_progress_div;
     reg                      led_buf_sel;
     reg                      led_load_buf_sel;
 
@@ -294,6 +298,7 @@ module nexys_a7_top #(
             run_led_hold          <= '0;
             writeback_led_hold    <= '0;
             led_progress          <= 4'b0000;
+            led_progress_div      <= '0;
             led_buf_sel           <= 1'b0;
             led_load_buf_sel      <= 1'b0;
         end else begin
@@ -302,6 +307,11 @@ module nexys_a7_top #(
             b_wr_en    <= 1'b0;
             tx_start   <= 1'b0;
             heartbeat_ctr <= heartbeat_ctr + 1'b1;
+            if (led_progress_div == (LED_PROGRESS_STEP_CYCLES - 1)) begin
+                led_progress_div <= '0;
+            end else begin
+                led_progress_div <= led_progress_div + 1'b1;
+            end
 
             if (busy_led_hold != 0) begin
                 busy_led_hold <= busy_led_hold - 1'b1;
@@ -341,13 +351,17 @@ module nexys_a7_top #(
 
             if (core_clear_c_active) begin
                 clear_c_led_hold <= STAGE_LED_HOLD_CYCLES - 1;
-                led_progress     <= 4'b0001 << low2(core_clear_c_addr);
+                if (led_progress_div == '0) begin
+                    led_progress <= 4'b0001 << low2(core_clear_c_addr);
+                end
             end
 
             if (core_load_active) begin
                 load_led_hold    <= STAGE_LED_HOLD_CYCLES - 1;
-                led_progress     <= 4'b0001 << low2(core_load_count);
                 led_load_buf_sel <= core_load_buf_sel;
+                if (led_progress_div == '0) begin
+                    led_progress <= 4'b0001 << low2(core_load_count);
+                end
             end
 
             if (core_done) begin
@@ -362,13 +376,17 @@ module nexys_a7_top #(
 
             if (core_run_active) begin
                 run_led_hold <= STAGE_LED_HOLD_CYCLES - 1;
-                led_progress <= 4'b0001 << low2(core_run_count);
                 led_buf_sel  <= core_buf_sel;
+                if (led_progress_div == '0) begin
+                    led_progress <= 4'b0001 << low2(core_run_count);
+                end
             end
 
             if (core_writeback_active) begin
                 writeback_led_hold <= STAGE_LED_HOLD_CYCLES - 1;
-                led_progress       <= 4'b0001 << low2(core_wb_count);
+                if (led_progress_div == '0) begin
+                    led_progress <= 4'b0001 << low2(core_wb_count);
+                end
             end
 
             if (rx_valid) begin
@@ -423,6 +441,7 @@ module nexys_a7_top #(
                             a_wr_en      <= 1'b1;
                             a_wr_addr    <= pending_word[ADDRW-1:0];
                             a_wr_data    <= $signed(pending_data_byte);
+                            done_latched <= 1'b0;
                             tx_req_data  <= RESP_ACK;
                             tx_req_valid <= 1'b1;
                         end else begin
@@ -436,6 +455,7 @@ module nexys_a7_top #(
                             b_wr_en      <= 1'b1;
                             b_wr_addr    <= pending_word[ADDRW-1:0];
                             b_wr_data    <= $signed(pending_data_byte);
+                            done_latched <= 1'b0;
                             tx_req_data  <= RESP_ACK;
                             tx_req_valid <= 1'b1;
                         end else begin
