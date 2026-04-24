@@ -137,6 +137,7 @@ module tb_tpu_top;
         input integer n;
         begin
             for (idx = 0; idx < (n * n); idx = idx + 1) begin
+                @(negedge clk);
                 a_wr_en   = 1'b1;
                 a_wr_addr = idx[ADDRW-1:0];
                 a_wr_data = mat_a[idx];
@@ -146,6 +147,7 @@ module tb_tpu_top;
                 @(posedge clk);
             end
 
+            @(negedge clk);
             a_wr_en   = 1'b0;
             b_wr_en   = 1'b0;
             a_wr_addr = '0;
