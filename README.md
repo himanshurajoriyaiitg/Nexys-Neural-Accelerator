@@ -104,7 +104,7 @@ Each PE is the innermost compute unit:
 
 ### Controller FSM
 
-![controller](docs/diagrams/controller_fsm.svg)
+![Controller Diagram](docs/diagrams/controller.png)
 | State          | Action                                                     |
 | -------------- | ---------------------------------------------------------- |
 | `ST_IDLE`      | Waits for `start`. Asserts nothing.                        |
