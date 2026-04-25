@@ -368,6 +368,9 @@ module nexys_a7_top #(
                 done_latched <= 1'b1;
                 led_progress <= active_matrix_dim;
             end
+            if (core_busy) begin
+                done_latched <= 1'b0;
+            end
 
             if (core_clear_acc) begin
                 clear_acc_led_hold <= STAGE_LED_HOLD_CYCLES - 1;
