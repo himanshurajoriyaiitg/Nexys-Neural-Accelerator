@@ -28,6 +28,7 @@ module tpu_top #(
     output wire [15:0]              debug_load_count,
     output wire [15:0]              debug_wb_count,
     output wire [15:0]              debug_clear_c_addr,
+    output reg                      overflow_flag,
     output wire [DIM_W-1:0]         active_matrix_dim,
 
     input  wire                     a_wr_en,
@@ -106,6 +107,7 @@ module tpu_top #(
     reg  signed [DW-1:0]    a_feed [0:ARRAY_N-1];
     reg  signed [DW-1:0]    b_feed [0:ARRAY_N-1];
     wire signed [ACCW-1:0]  partial_tile [0:ARRAY_N-1][0:ARRAY_N-1];
+    wire                    array_overflow_any;
 
     integer load_row_now;
     integer load_col_now;
@@ -222,16 +224,24 @@ module tpu_top #(
         .en        (run_en),
         .a_in      (a_feed),
         .b_in      (b_feed),
-        .c_out     (partial_tile)
+        .c_out     (partial_tile),
+        .overflow_any(array_overflow_any)
     );
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            cycle_count <= 32'd0;
+            cycle_count   <= 32'd0;
+            overflow_flag <= 1'b0;
         end else if (start && !busy) begin
-            cycle_count <= 32'd0;
+            cycle_count   <= 32'd0;
+            overflow_flag <= 1'b0;
         end else if (busy) begin
             cycle_count <= cycle_count + 1'b1;
+            if (array_overflow_any) begin
+                overflow_flag <= 1'b1;
+            end
+        end else if (array_overflow_any) begin
+            overflow_flag <= 1'b1;
         end
     end
 

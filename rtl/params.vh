@@ -1,7 +1,7 @@
 `ifndef NEXYS_A7_UART_MATMUL_PARAMS_VH
 `define NEXYS_A7_UART_MATMUL_PARAMS_VH
 
-`define DEFAULT_MATRIX_N   8
+`define DEFAULT_MATRIX_N   32
 `define DEFAULT_ARRAY_N    8
 `define DEFAULT_DW         8
 `define DEFAULT_ACCW      (2*`DEFAULT_DW + $clog2(`DEFAULT_MATRIX_N))

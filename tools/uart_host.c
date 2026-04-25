@@ -525,7 +525,7 @@ static void load_matrix(serial_handle_t handle, uint8_t cmd, const int8_t *mat, 
     }
 }
 
-static void query_status(serial_handle_t handle, int timeout_ms, bool *busy, bool *done, uint32_t *cycles)
+static void query_status(serial_handle_t handle, int timeout_ms, bool *busy, bool *done, bool *overflow, uint32_t *cycles)
 {
     uint8_t resp[6];
 
@@ -540,24 +540,30 @@ static void query_status(serial_handle_t handle, int timeout_ms, bool *busy, boo
 
     *busy = (resp[1] & 0x01u) != 0;
     *done = (resp[1] & 0x02u) != 0;
+    *overflow = (resp[1] & 0x04u) != 0;
     *cycles = ((uint32_t)resp[2] << 24) |
               ((uint32_t)resp[3] << 16) |
               ((uint32_t)resp[4] << 8)  |
               (uint32_t)resp[5];
 }
 
-static uint32_t wait_done(serial_handle_t handle, int timeout_ms, bool verbose)
+static uint32_t wait_done(serial_handle_t handle, int timeout_ms, bool verbose, bool *overflow_seen)
 {
     bool busy;
     bool done;
+    bool overflow;
     bool saw_busy = false;
     uint32_t cycles = 0;
     uint64_t start_ms = monotonic_ms();
 
+    *overflow_seen = false;
+
     while (true) {
-        query_status(handle, timeout_ms, &busy, &done, &cycles);
+        query_status(handle, timeout_ms, &busy, &done, &overflow, &cycles);
+        *overflow_seen = *overflow_seen || overflow;
         if (verbose) {
-            printf("Status: busy=%d done=%d cycles=%u\n", busy ? 1 : 0, done ? 1 : 0, cycles);
+            printf("Status: busy=%d done=%d overflow=%d cycles=%u\n",
+                   busy ? 1 : 0, done ? 1 : 0, overflow ? 1 : 0, cycles);
             fflush(stdout);
         }
 
@@ -618,7 +624,7 @@ static void dump_matrix_c(serial_handle_t handle, int32_t *mat, int n, int timeo
     }
 }
 
-static void write_run_info(const char *path, int n, uint32_t cycles)
+static void write_run_info(const char *path, int n, uint32_t cycles, bool overflow_seen)
 {
     FILE *fp = fopen(path, "w");
     if (fp == NULL) {
@@ -627,6 +633,7 @@ static void write_run_info(const char *path, int n, uint32_t cycles)
 
     fprintf(fp, "MATRIX_N=%d\n", n);
     fprintf(fp, "CYCLES=%u\n", cycles);
+    fprintf(fp, "OVERFLOW=%d\n", overflow_seen ? 1 : 0);
     fclose(fp);
 }
 
@@ -639,6 +646,7 @@ int main(int argc, char **argv)
     int8_t *matrix_b;
     int32_t *matrix_c;
     uint32_t cycles;
+    bool overflow_seen;
     char path_buf[512];
     unsigned int seed_value;
 
@@ -676,7 +684,7 @@ int main(int argc, char **argv)
     log_msg(opt.verbose, "Sending START.");
     send_frame(serial_handle, CMD_START, (uint16_t)opt.n, 0);
     wait_ack(serial_handle, opt.timeout_ms, "start");
-    cycles = wait_done(serial_handle, opt.timeout_ms, opt.verbose);
+    cycles = wait_done(serial_handle, opt.timeout_ms, opt.verbose, &overflow_seen);
     log_msg(opt.verbose, "Requesting dump.");
     dump_matrix_c(serial_handle, matrix_c, opt.n, opt.timeout_ms, opt.verbose);
 
@@ -685,12 +693,13 @@ int main(int argc, char **argv)
     snprintf(path_buf, sizeof(path_buf), "%s/matrix_c_fpga.txt", opt.out_dir);
     write_matrix_i32(path_buf, matrix_c, opt.n);
     snprintf(path_buf, sizeof(path_buf), "%s/run_info.txt", opt.out_dir);
-    write_run_info(path_buf, opt.n, cycles);
+    write_run_info(path_buf, opt.n, cycles, overflow_seen);
 
     printf("Wrote %s/matrix_a.txt\n", opt.out_dir);
     printf("Wrote %s/matrix_b.txt\n", opt.out_dir);
     printf("Wrote %s/matrix_c_fpga.txt\n", opt.out_dir);
     printf("Last reported cycle count: %u\n", cycles);
+    printf("Overflow flag: %s\n", overflow_seen ? "SET" : "clear");
 
     free(matrix_a);
     free(matrix_b);

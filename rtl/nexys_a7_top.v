@@ -116,6 +116,7 @@ module nexys_a7_top #(
     wire [15:0]              core_load_count;
     wire [15:0]              core_wb_count;
     wire [15:0]              core_clear_c_addr;
+    wire                     core_overflow_flag;
     wire [DIM_W-1:0]         active_matrix_dim;
     wire [ADDRW:0]           active_matrix_elems;
 
@@ -234,6 +235,7 @@ module nexys_a7_top #(
         .debug_load_count (core_load_count),
         .debug_wb_count   (core_wb_count),
         .debug_clear_c_addr(core_clear_c_addr),
+        .overflow_flag    (core_overflow_flag),
         .active_matrix_dim(active_matrix_dim),
         .a_wr_en          (a_wr_en),
         .b_wr_en          (b_wr_en),
@@ -506,7 +508,7 @@ module nexys_a7_top #(
                     end
 
                     STREAM_STATUS_FLAGS: begin
-                        tx_req_data  <= {6'b0, done_latched, core_busy};
+                        tx_req_data  <= {5'b0, core_overflow_flag, done_latched, core_busy};
                         tx_req_valid <= 1'b1;
                         stream_state <= STREAM_STATUS_C3;
                     end
