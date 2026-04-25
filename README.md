@@ -105,15 +105,17 @@ Each PE is the innermost compute unit:
 ### Controller FSM
 
 ![Controller Diagram](docs/diagrams/controller.png)
-| State          | Action                                                     |
-| -------------- | ---------------------------------------------------------- |
-| `ST_IDLE`      | Waits for `start`. Asserts nothing.                        |
-| `ST_CLEAR_C`   | Writes zeros to all C BRAM addresses.                      |
-| `ST_LOAD`      | Reads tile rows/cols from A and B BRAM into local buffers. |
-| `ST_CLEAR_ACC` | Pulses `clear_acc` to zero all PE accumulators.            |
-| `ST_RUN`       | Enables the systolic array for `(2 × ARRAY_N − 1)` cycles. |
-| `ST_WRITEBACK` | Reads PE outputs and adds them into C BRAM.                |
-| `ST_DONE`      | Asserts `done`, holds until next `start` or reset.         |
+
+| State            | Action                                                                                                           |
+|------------------|----------------------------------------------------------------------------------------------------------------- |
+| `ST_IDLE`        | Waits for `start`. Validates `matrix_dim`. All control signals = 0.                                              |
+| `ST_CLEAR_C`     | Clears entire C matrix (`clear_c_active = 1`). Iterates over all C addresses.                                    |
+| `ST_PRELOAD`     | Loads first K-tile (k=0) into buffer. `load_active = 1`, counts 0 → T²−1.                                        |
+| `ST_CLEAR_ACC`   | Clears all PE accumulators (`clear_acc = 1`).                                                                    |
+| `ST_RUN`         | Enables systolic computation (`run_en = 1`). Runs for `(3T−2)` cycles. Prefetch next tile if `load_pending = 1`. |
+| `ST_WAIT_LOAD`   | Waits until next buffer is ready (`other_buf_will_be_ready`). Continues loading if needed.                       |
+| `ST_WRITEBACK`   | Writes computed tile to C (`writeback_active = 1`). Also loads next output tile if available.                    |
+| `ST_DONE`        | Asserts `done = 1`. Waits for next `start` or reset.                                                             |
 
 Asynchronous reset from any state returns immediately to `ST_IDLE`.
 
