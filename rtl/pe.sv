@@ -19,7 +19,11 @@ module pe #(
     (* use_dsp = "yes" *) reg signed [2*DW-1:0] mult_term;
 
     always @(*) begin
-        mult_term = a_in * b_in;
+        if (a_in != 0 && b_in != 0) begin
+            mult_term = a_in * b_in;
+        end else begin
+            mult_term = '0; 
+        end
     end
 
     always @(posedge clk or negedge rst_n) begin
