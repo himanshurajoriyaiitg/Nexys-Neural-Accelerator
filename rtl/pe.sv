@@ -24,8 +24,11 @@ module pe #(
     localparam signed [ACCW:0] NEG_THRESH = -OVERFLOW_THRESH;
 
     always @(*) begin
-        mult_term    = a_in * b_in;
-        next_acc_ext = $signed(acc) + $signed(mult_term);
+        if (a_in != 0 && b_in != 0) begin
+            mult_term = a_in * b_in;
+        end else begin
+            mult_term = '0; 
+        end
     end
 
     always @(posedge clk or negedge rst_n) begin
