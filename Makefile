@@ -4,12 +4,18 @@ SHELL := cmd
 EXE := .exe
 RM := del /Q
 HOST_BIN := tools\uart_host.exe
+HOST_SRC := tools\uart_host.c
 BATCH_DIR := batch_files
+HOST_BUILD := $(BATCH_DIR)\build_host.bat
 else
 EXE :=
 RM := rm -f
 HOST_BIN := tools/uart_host
+HOST_SRC := tools/uart_host.c
 BATCH_DIR := batch_files
+CC ?= gcc
+CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic
+HOST_BUILD := $(CC) $(CFLAGS) $(HOST_SRC) -o $(HOST_BIN)
 endif
 
 PORT ?= COM5
@@ -22,7 +28,7 @@ MATRIX_B ?= input_b.txt
 
 help:
 	@echo Targets:
-	@echo   make host         - Build the Windows UART host program
+	@echo   make host         - Build the UART host program
 	@echo   make vivado       - Open/create the Vivado project
 	@echo   make check-sim    - Check sim\output files with Python
 	@echo   make check-fpga   - Check fpga_output files with Python
@@ -37,7 +43,7 @@ help:
 	@echo   MATRIX_A=input_a.txt MATRIX_B=input_b.txt
 
 host:
-	$(BATCH_DIR)\build_host.bat
+	$(HOST_BUILD)
 
 vivado:
 	$(BATCH_DIR)\open_vivado.bat

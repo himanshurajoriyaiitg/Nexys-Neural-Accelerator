@@ -28,15 +28,25 @@
 #define CMD_START   0x03
 #define CMD_STATUS  0x04
 #define CMD_DUMP_C  0x05
+#define CMD_PROFILE 0x06
+#define CMD_WRITE_A_BURST 0x10
+#define CMD_WRITE_B_BURST 0x11
+#define CMD_ZERO_A_RUN    0x12
+#define CMD_ZERO_B_RUN    0x13
 
 #define RESP_ACK    0x5A
 #define RESP_ERROR  0xE0
 #define RESP_STATUS 0xA6
 #define RESP_DUMP   0xA7
+#define RESP_PROFILE 0xA8
 
 #define MAX_RUNTIME_N 255
 #define MAX_MATRIX_ELEMS 65535u
 #define DEFAULT_UART_BAUD 921600
+#define DEFAULT_ITERATIONS 1
+#define PROFILE_PACKET_BYTES 52u
+#define BURST_MAX_BYTES 255u
+#define ZERO_RUN_THRESHOLD 4u
 
 struct options {
     const char *port;
@@ -45,11 +55,42 @@ struct options {
     const char *out_dir;
     int n;
     int baud;
+    int iterations;
     int timeout_ms;
     unsigned int seed;
     bool use_random;
     bool seed_given;
+    bool reuse_a;
+    bool reuse_b;
+    bool disable_pack;
     bool verbose;
+};
+
+struct load_stats {
+    uint32_t single_cmds;
+    uint32_t burst_cmds;
+    uint32_t burst_values;
+    uint32_t zero_run_cmds;
+    uint32_t zero_values;
+};
+
+struct profile_data {
+    bool busy;
+    bool done;
+    bool overflow;
+    uint16_t matrix_n;
+    uint32_t cycles;
+    uint32_t clear_c_cycles;
+    uint32_t preload_cycles;
+    uint32_t clear_acc_cycles;
+    uint32_t run_cycles;
+    uint32_t wait_load_cycles;
+    uint32_t writeback_cycles;
+    uint32_t load_overlap_cycles;
+    uint32_t buffer_swap_count;
+    uint32_t output_tile_count;
+    uint32_t k_pass_count;
+    uint32_t result_signature;
 };
 
 #ifdef _WIN32
@@ -64,8 +105,8 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s --port <serial> --random [--n 32] [--seed 1] [--baud 921600] [--out-dir fpga_output] [--verbose]\n"
-            "  %s --port <serial> --matrix-a <file> --matrix-b <file> [--n 32] [--baud 921600] [--out-dir fpga_output] [--verbose]\n",
+            "  %s --port <serial> --random [--n 32] [--seed 1] [--iterations 4] [--reuse-a] [--reuse-b] [--baud 921600] [--out-dir fpga_output] [--no-pack] [--verbose]\n"
+            "  %s --port <serial> --matrix-a <file> --matrix-b <file> [--n 32] [--iterations 4] [--reuse-a] [--reuse-b] [--baud 921600] [--out-dir fpga_output] [--no-pack] [--verbose]\n",
             prog, prog);
 }
 
@@ -102,6 +143,7 @@ static void parse_args(int argc, char **argv, struct options *opt)
     memset(opt, 0, sizeof(*opt));
     opt->n = 32;
     opt->baud = DEFAULT_UART_BAUD;
+    opt->iterations = DEFAULT_ITERATIONS;
     opt->timeout_ms = 30000;
     opt->out_dir = "fpga_output";
 
@@ -118,6 +160,8 @@ static void parse_args(int argc, char **argv, struct options *opt)
             opt->n = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--baud") == 0 && (i + 1) < argc) {
             opt->baud = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--iterations") == 0 && (i + 1) < argc) {
+            opt->iterations = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--timeout-ms") == 0 && (i + 1) < argc) {
             opt->timeout_ms = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--seed") == 0 && (i + 1) < argc) {
@@ -125,6 +169,12 @@ static void parse_args(int argc, char **argv, struct options *opt)
             opt->seed_given = true;
         } else if (strcmp(argv[i], "--random") == 0) {
             opt->use_random = true;
+        } else if (strcmp(argv[i], "--reuse-a") == 0) {
+            opt->reuse_a = true;
+        } else if (strcmp(argv[i], "--reuse-b") == 0) {
+            opt->reuse_b = true;
+        } else if (strcmp(argv[i], "--no-pack") == 0) {
+            opt->disable_pack = true;
         } else if (strcmp(argv[i], "--verbose") == 0) {
             opt->verbose = true;
         } else {
@@ -140,6 +190,10 @@ static void parse_args(int argc, char **argv, struct options *opt)
 
     if (opt->n < 1 || opt->n > MAX_RUNTIME_N) {
         fail_msg("Runtime N must satisfy 1 <= N <= 255.");
+    }
+
+    if (opt->iterations < 1) {
+        fail_msg("iterations must be >= 1.");
     }
 
     if (((unsigned int)opt->n * (unsigned int)opt->n) > MAX_MATRIX_ELEMS) {
@@ -257,6 +311,49 @@ static void write_matrix_i32(const char *path, const int32_t *mat, int n)
     }
 
     fclose(fp);
+}
+
+static void compute_reference(const int8_t *matrix_a, const int8_t *matrix_b, int32_t *matrix_c_ref, int n)
+{
+    int r;
+    int c;
+    int k;
+
+    for (r = 0; r < n; ++r) {
+        for (c = 0; c < n; ++c) {
+            int32_t total = 0;
+            for (k = 0; k < n; ++k) {
+                total += (int32_t)matrix_a[(r * n) + k] * (int32_t)matrix_b[(k * n) + c];
+            }
+            matrix_c_ref[(r * n) + c] = total;
+        }
+    }
+}
+
+static void verify_result_or_die(const int32_t *got, const int32_t *expected, int n, int iteration)
+{
+    int idx;
+    int elems = n * n;
+
+    for (idx = 0; idx < elems; ++idx) {
+        if (got[idx] != expected[idx]) {
+            int row = idx / n;
+            int col = idx % n;
+            fprintf(stderr,
+                    "Verification failed on iteration %d at (%d, %d): got %d expected %d\n",
+                    iteration,
+                    row,
+                    col,
+                    got[idx],
+                    expected[idx]);
+            exit(1);
+        }
+    }
+}
+
+static void join_path(char *dst, size_t dst_len, const char *dir, const char *leaf)
+{
+    snprintf(dst, dst_len, "%s/%s", dir, leaf);
 }
 
 static void sleep_ms(int ms)
@@ -508,20 +605,157 @@ static void wait_ack(serial_handle_t handle, int timeout_ms, const char *stage)
     exit(1);
 }
 
-static void load_matrix(serial_handle_t handle, uint8_t cmd, const int8_t *mat, int n, int timeout_ms, bool verbose, const char *name)
+static uint32_t read_be32(const uint8_t *buf)
 {
-    uint16_t idx;
-    uint16_t elems = (uint16_t)(n * n);
-    char msg[128];
+    return ((uint32_t)buf[0] << 24) |
+           ((uint32_t)buf[1] << 16) |
+           ((uint32_t)buf[2] << 8)  |
+           (uint32_t)buf[3];
+}
 
-    for (idx = 0; idx < elems; ++idx) {
-        if (verbose && ((idx % 32u) == 0u)) {
+static size_t zero_run_len(const int8_t *mat, size_t start_idx, size_t elems)
+{
+    size_t len = 0;
+
+    while ((start_idx + len) < elems &&
+           mat[start_idx + len] == 0 &&
+           len < BURST_MAX_BYTES) {
+        ++len;
+    }
+
+    return len;
+}
+
+static void send_single_write(serial_handle_t handle,
+                              uint8_t cmd,
+                              uint16_t addr,
+                              int8_t value,
+                              int timeout_ms,
+                              struct load_stats *stats,
+                              const char *stage)
+{
+    send_frame(handle, cmd, addr, (uint8_t)value);
+    wait_ack(handle, timeout_ms, stage);
+    stats->single_cmds += 1u;
+}
+
+static void send_burst_write(serial_handle_t handle,
+                             uint8_t cmd,
+                             uint16_t start_addr,
+                             const int8_t *values,
+                             uint8_t count,
+                             int timeout_ms,
+                             struct load_stats *stats,
+                             const char *stage)
+{
+    send_frame(handle, cmd, start_addr, count);
+    write_all(handle, (const uint8_t *)values, count);
+    wait_ack(handle, timeout_ms, stage);
+    stats->burst_cmds += 1u;
+    stats->burst_values += count;
+}
+
+static void send_zero_run(serial_handle_t handle,
+                          uint8_t cmd,
+                          uint16_t start_addr,
+                          uint8_t count,
+                          int timeout_ms,
+                          struct load_stats *stats,
+                          const char *stage)
+{
+    send_frame(handle, cmd, start_addr, count);
+    wait_ack(handle, timeout_ms, stage);
+    stats->zero_run_cmds += 1u;
+    stats->zero_values += count;
+}
+
+static void load_matrix(serial_handle_t handle,
+                        uint8_t single_cmd,
+                        uint8_t burst_cmd,
+                        uint8_t zero_cmd,
+                        const int8_t *mat,
+                        int n,
+                        int timeout_ms,
+                        bool verbose,
+                        bool disable_pack,
+                        const char *name,
+                        struct load_stats *stats)
+{
+    size_t idx = 0;
+    size_t elems = (size_t)n * (size_t)n;
+    char msg[160];
+
+    memset(stats, 0, sizeof(*stats));
+
+    while (idx < elems) {
+        size_t zr_len = zero_run_len(mat, idx, elems);
+        size_t burst_start = idx;
+        size_t burst_len = 0;
+
+        if (verbose && ((idx % 256u) == 0u)) {
             snprintf(msg, sizeof(msg), "Loading %s index %u/%u", name,
                      (unsigned int)idx, (unsigned int)(elems - 1u));
             log_msg(true, msg);
         }
-        send_frame(handle, cmd, idx, (uint8_t)mat[idx]);
-        wait_ack(handle, timeout_ms, name);
+
+        if (!disable_pack && zr_len >= ZERO_RUN_THRESHOLD) {
+            while (zr_len > 0) {
+                uint8_t chunk = (uint8_t)((zr_len > BURST_MAX_BYTES) ? BURST_MAX_BYTES : zr_len);
+                send_zero_run(handle, zero_cmd, (uint16_t)idx, chunk, timeout_ms, stats, name);
+                idx += chunk;
+                zr_len -= chunk;
+            }
+            continue;
+        }
+
+        if (disable_pack) {
+            send_single_write(handle,
+                              single_cmd,
+                              (uint16_t)idx,
+                              mat[idx],
+                              timeout_ms,
+                              stats,
+                              name);
+            ++idx;
+            continue;
+        }
+
+        while (idx < elems && burst_len < BURST_MAX_BYTES) {
+            zr_len = zero_run_len(mat, idx, elems);
+            if (zr_len >= ZERO_RUN_THRESHOLD) {
+                break;
+            }
+            ++idx;
+            ++burst_len;
+        }
+
+        if (burst_len > 1u) {
+            send_burst_write(handle,
+                             burst_cmd,
+                             (uint16_t)burst_start,
+                             &mat[burst_start],
+                             (uint8_t)burst_len,
+                             timeout_ms,
+                             stats,
+                             name);
+        } else if (burst_len == 1u) {
+            send_single_write(handle,
+                              single_cmd,
+                              (uint16_t)burst_start,
+                              mat[burst_start],
+                              timeout_ms,
+                              stats,
+                              name);
+        } else {
+            send_single_write(handle,
+                              single_cmd,
+                              (uint16_t)idx,
+                              mat[idx],
+                              timeout_ms,
+                              stats,
+                              name);
+            ++idx;
+        }
     }
 }
 
@@ -541,10 +775,37 @@ static void query_status(serial_handle_t handle, int timeout_ms, bool *busy, boo
     *busy = (resp[1] & 0x01u) != 0;
     *done = (resp[1] & 0x02u) != 0;
     *overflow = (resp[1] & 0x04u) != 0;
-    *cycles = ((uint32_t)resp[2] << 24) |
-              ((uint32_t)resp[3] << 16) |
-              ((uint32_t)resp[4] << 8)  |
-              (uint32_t)resp[5];
+    *cycles = read_be32(&resp[2]);
+}
+
+static void query_profile(serial_handle_t handle, int timeout_ms, struct profile_data *profile)
+{
+    uint8_t resp[PROFILE_PACKET_BYTES];
+
+    send_frame(handle, CMD_PROFILE, 0, 0);
+    read_exact(handle, resp, sizeof(resp), timeout_ms, "profile");
+
+    if (resp[0] != RESP_PROFILE) {
+        fprintf(stderr, "Bad profile response from FPGA: 0x%02X\n", resp[0]);
+        exit(1);
+    }
+
+    profile->busy = (resp[1] & 0x01u) != 0;
+    profile->done = (resp[1] & 0x02u) != 0;
+    profile->overflow = (resp[1] & 0x04u) != 0;
+    profile->matrix_n = (uint16_t)(((uint16_t)resp[2] << 8) | (uint16_t)resp[3]);
+    profile->cycles = read_be32(&resp[4]);
+    profile->clear_c_cycles = read_be32(&resp[8]);
+    profile->preload_cycles = read_be32(&resp[12]);
+    profile->clear_acc_cycles = read_be32(&resp[16]);
+    profile->run_cycles = read_be32(&resp[20]);
+    profile->wait_load_cycles = read_be32(&resp[24]);
+    profile->writeback_cycles = read_be32(&resp[28]);
+    profile->load_overlap_cycles = read_be32(&resp[32]);
+    profile->buffer_swap_count = read_be32(&resp[36]);
+    profile->output_tile_count = read_be32(&resp[40]);
+    profile->k_pass_count = read_be32(&resp[44]);
+    profile->result_signature = read_be32(&resp[48]);
 }
 
 static uint32_t wait_done(serial_handle_t handle, int timeout_ms, bool verbose, bool *overflow_seen)
@@ -624,7 +885,55 @@ static void dump_matrix_c(serial_handle_t handle, int32_t *mat, int n, int timeo
     }
 }
 
-static void write_run_info(const char *path, int n, uint32_t cycles, bool overflow_seen)
+static void print_profile_summary(const struct profile_data *profile,
+                                  const struct load_stats *a_stats,
+                                  const struct load_stats *b_stats,
+                                  int iteration,
+                                  uint64_t host_elapsed_ms)
+{
+    printf("Iteration %d summary:\n", iteration);
+    printf("  cycles=%u host_ms=%llu overflow=%s signature=0x%08X\n",
+           profile->cycles,
+           (unsigned long long)host_elapsed_ms,
+           profile->overflow ? "SET" : "clear",
+           profile->result_signature);
+    printf("  stage_cycles clear_c=%u preload=%u clear_acc=%u run=%u wait_load=%u writeback=%u overlap=%u\n",
+           profile->clear_c_cycles,
+           profile->preload_cycles,
+           profile->clear_acc_cycles,
+           profile->run_cycles,
+           profile->wait_load_cycles,
+           profile->writeback_cycles,
+           profile->load_overlap_cycles);
+    printf("  tiling buffer_swaps=%u output_tiles=%u k_passes=%u\n",
+           profile->buffer_swap_count,
+           profile->output_tile_count,
+           profile->k_pass_count);
+    printf("  upload_a single=%u burst=%u burst_vals=%u zero_runs=%u zero_vals=%u\n",
+           a_stats->single_cmds,
+           a_stats->burst_cmds,
+           a_stats->burst_values,
+           a_stats->zero_run_cmds,
+           a_stats->zero_values);
+    printf("  upload_b single=%u burst=%u burst_vals=%u zero_runs=%u zero_vals=%u\n",
+           b_stats->single_cmds,
+           b_stats->burst_cmds,
+           b_stats->burst_values,
+           b_stats->zero_run_cmds,
+           b_stats->zero_values);
+}
+
+static void write_run_info(const char *path,
+                           int n,
+                           int iteration,
+                           bool random_mode,
+                           bool reuse_a,
+                           bool reuse_b,
+                           bool overflow_seen,
+                           uint64_t host_elapsed_ms,
+                           const struct load_stats *a_stats,
+                           const struct load_stats *b_stats,
+                           const struct profile_data *profile)
 {
     FILE *fp = fopen(path, "w");
     if (fp == NULL) {
@@ -632,8 +941,36 @@ static void write_run_info(const char *path, int n, uint32_t cycles, bool overfl
     }
 
     fprintf(fp, "MATRIX_N=%d\n", n);
-    fprintf(fp, "CYCLES=%u\n", cycles);
+    fprintf(fp, "ITERATION=%d\n", iteration);
+    fprintf(fp, "RANDOM_MODE=%d\n", random_mode ? 1 : 0);
+    fprintf(fp, "REUSE_A=%d\n", reuse_a ? 1 : 0);
+    fprintf(fp, "REUSE_B=%d\n", reuse_b ? 1 : 0);
+    fprintf(fp, "VERIFY=PASS\n");
+    fprintf(fp, "CYCLES=%u\n", profile->cycles);
     fprintf(fp, "OVERFLOW=%d\n", overflow_seen ? 1 : 0);
+    fprintf(fp, "HOST_ELAPSED_MS=%llu\n", (unsigned long long)host_elapsed_ms);
+    fprintf(fp, "PROFILE_MATRIX_N=%u\n", profile->matrix_n);
+    fprintf(fp, "PROFILE_CLEAR_C_CYCLES=%u\n", profile->clear_c_cycles);
+    fprintf(fp, "PROFILE_PRELOAD_CYCLES=%u\n", profile->preload_cycles);
+    fprintf(fp, "PROFILE_CLEAR_ACC_CYCLES=%u\n", profile->clear_acc_cycles);
+    fprintf(fp, "PROFILE_RUN_CYCLES=%u\n", profile->run_cycles);
+    fprintf(fp, "PROFILE_WAIT_LOAD_CYCLES=%u\n", profile->wait_load_cycles);
+    fprintf(fp, "PROFILE_WRITEBACK_CYCLES=%u\n", profile->writeback_cycles);
+    fprintf(fp, "PROFILE_LOAD_OVERLAP_CYCLES=%u\n", profile->load_overlap_cycles);
+    fprintf(fp, "PROFILE_BUFFER_SWAPS=%u\n", profile->buffer_swap_count);
+    fprintf(fp, "PROFILE_OUTPUT_TILES=%u\n", profile->output_tile_count);
+    fprintf(fp, "PROFILE_K_PASSES=%u\n", profile->k_pass_count);
+    fprintf(fp, "PROFILE_SIGNATURE=0x%08X\n", profile->result_signature);
+    fprintf(fp, "A_SINGLE_CMDS=%u\n", a_stats->single_cmds);
+    fprintf(fp, "A_BURST_CMDS=%u\n", a_stats->burst_cmds);
+    fprintf(fp, "A_BURST_VALUES=%u\n", a_stats->burst_values);
+    fprintf(fp, "A_ZERO_RUN_CMDS=%u\n", a_stats->zero_run_cmds);
+    fprintf(fp, "A_ZERO_VALUES=%u\n", a_stats->zero_values);
+    fprintf(fp, "B_SINGLE_CMDS=%u\n", b_stats->single_cmds);
+    fprintf(fp, "B_BURST_CMDS=%u\n", b_stats->burst_cmds);
+    fprintf(fp, "B_BURST_VALUES=%u\n", b_stats->burst_values);
+    fprintf(fp, "B_ZERO_RUN_CMDS=%u\n", b_stats->zero_run_cmds);
+    fprintf(fp, "B_ZERO_VALUES=%u\n", b_stats->zero_values);
     fclose(fp);
 }
 
@@ -645,10 +982,22 @@ int main(int argc, char **argv)
     int8_t *matrix_a;
     int8_t *matrix_b;
     int32_t *matrix_c;
+    int32_t *matrix_c_ref;
+    struct load_stats load_stats_a;
+    struct load_stats load_stats_b;
+    struct profile_data profile;
     uint32_t cycles;
     bool overflow_seen;
+    uint64_t host_start_ms;
+    uint64_t host_elapsed_ms;
+    uint64_t total_host_ms = 0;
+    uint64_t total_cycles = 0;
     char path_buf[512];
+    char run_dir[512];
+    char summary_path[512];
+    FILE *summary_fp = NULL;
     unsigned int seed_value;
+    int iteration;
 
     parse_args(argc, argv, &opt);
     ensure_dir(opt.out_dir);
@@ -657,52 +1006,187 @@ int main(int argc, char **argv)
     matrix_a = (int8_t *)malloc(elems * sizeof(*matrix_a));
     matrix_b = (int8_t *)malloc(elems * sizeof(*matrix_b));
     matrix_c = (int32_t *)malloc(elems * sizeof(*matrix_c));
+    matrix_c_ref = (int32_t *)malloc(elems * sizeof(*matrix_c_ref));
 
-    if (matrix_a == NULL || matrix_b == NULL || matrix_c == NULL) {
+    if (matrix_a == NULL || matrix_b == NULL || matrix_c == NULL || matrix_c_ref == NULL) {
         fail_msg("Failed to allocate host matrices.");
     }
 
     if (opt.use_random) {
         seed_value = opt.seed_given ? opt.seed : (unsigned int)time(NULL);
-        random_matrix(matrix_a, opt.n, &seed_value);
-        random_matrix(matrix_b, opt.n, &seed_value);
     } else {
         read_matrix_file(opt.matrix_a_path, matrix_a, opt.n);
         read_matrix_file(opt.matrix_b_path, matrix_b, opt.n);
+        seed_value = 0u;
     }
-
-    snprintf(path_buf, sizeof(path_buf), "%s/matrix_a.txt", opt.out_dir);
-    write_matrix_i8(path_buf, matrix_a, opt.n);
-    snprintf(path_buf, sizeof(path_buf), "%s/matrix_b.txt", opt.out_dir);
-    write_matrix_i8(path_buf, matrix_b, opt.n);
 
     serial_handle = serial_open(opt.port, opt.baud);
     log_msg(opt.verbose, "Opened serial port.");
 
-    load_matrix(serial_handle, CMD_WRITE_A, matrix_a, opt.n, opt.timeout_ms, opt.verbose, "matrix A");
-    load_matrix(serial_handle, CMD_WRITE_B, matrix_b, opt.n, opt.timeout_ms, opt.verbose, "matrix B");
-    log_msg(opt.verbose, "Sending START.");
-    send_frame(serial_handle, CMD_START, (uint16_t)opt.n, 0);
-    wait_ack(serial_handle, opt.timeout_ms, "start");
-    cycles = wait_done(serial_handle, opt.timeout_ms, opt.verbose, &overflow_seen);
-    log_msg(opt.verbose, "Requesting dump.");
-    dump_matrix_c(serial_handle, matrix_c, opt.n, opt.timeout_ms, opt.verbose);
+    if (opt.iterations > 1) {
+        join_path(summary_path, sizeof(summary_path), opt.out_dir, "batch_summary.txt");
+        summary_fp = fopen(summary_path, "w");
+        if (summary_fp == NULL) {
+            fail(summary_path);
+        }
+        fprintf(summary_fp, "iteration,cycles,host_ms,overflow,signature,a_single,a_burst,a_zero,b_single,b_burst,b_zero\n");
+    }
+
+    for (iteration = 0; iteration < opt.iterations; ++iteration) {
+        bool load_a_this_iter = (iteration == 0) || !opt.reuse_a;
+        bool load_b_this_iter = (iteration == 0) || !opt.reuse_b;
+
+        if (opt.use_random) {
+            if (load_a_this_iter) {
+                random_matrix(matrix_a, opt.n, &seed_value);
+            }
+            if (load_b_this_iter) {
+                random_matrix(matrix_b, opt.n, &seed_value);
+            }
+        }
+
+        compute_reference(matrix_a, matrix_b, matrix_c_ref, opt.n);
+
+        if (opt.iterations == 1) {
+            snprintf(run_dir, sizeof(run_dir), "%s", opt.out_dir);
+        } else {
+            snprintf(run_dir, sizeof(run_dir), "%s/iter_%03d", opt.out_dir, iteration);
+            ensure_dir(run_dir);
+        }
+
+        join_path(path_buf, sizeof(path_buf), run_dir, "matrix_a.txt");
+        write_matrix_i8(path_buf, matrix_a, opt.n);
+        join_path(path_buf, sizeof(path_buf), run_dir, "matrix_b.txt");
+        write_matrix_i8(path_buf, matrix_b, opt.n);
+
+        memset(&load_stats_a, 0, sizeof(load_stats_a));
+        memset(&load_stats_b, 0, sizeof(load_stats_b));
+
+        host_start_ms = monotonic_ms();
+
+        if (load_a_this_iter) {
+            load_matrix(serial_handle,
+                        CMD_WRITE_A,
+                        CMD_WRITE_A_BURST,
+                        CMD_ZERO_A_RUN,
+                        matrix_a,
+                        opt.n,
+                        opt.timeout_ms,
+                        opt.verbose,
+                        opt.disable_pack,
+                        "matrix A",
+                        &load_stats_a);
+        }
+
+        if (load_b_this_iter) {
+            load_matrix(serial_handle,
+                        CMD_WRITE_B,
+                        CMD_WRITE_B_BURST,
+                        CMD_ZERO_B_RUN,
+                        matrix_b,
+                        opt.n,
+                        opt.timeout_ms,
+                        opt.verbose,
+                        opt.disable_pack,
+                        "matrix B",
+                        &load_stats_b);
+        }
+
+        log_msg(opt.verbose, "Sending START.");
+        send_frame(serial_handle, CMD_START, (uint16_t)opt.n, 0);
+        wait_ack(serial_handle, opt.timeout_ms, "start");
+        cycles = wait_done(serial_handle, opt.timeout_ms, opt.verbose, &overflow_seen);
+        log_msg(opt.verbose, "Requesting dump.");
+        dump_matrix_c(serial_handle, matrix_c, opt.n, opt.timeout_ms, opt.verbose);
+        query_profile(serial_handle, opt.timeout_ms, &profile);
+        host_elapsed_ms = monotonic_ms() - host_start_ms;
+
+        if (profile.matrix_n != (uint16_t)opt.n) {
+            fail_msg("Profile matrix dimension does not match requested N.");
+        }
+        if (profile.cycles != cycles) {
+            fail_msg("Profile cycle count does not match status cycle count.");
+        }
+        if (profile.busy || !profile.done) {
+            fail_msg("Profile flags are inconsistent with a completed run.");
+        }
+
+        verify_result_or_die(matrix_c, matrix_c_ref, opt.n, iteration);
+
+        join_path(path_buf, sizeof(path_buf), run_dir, "matrix_c_fpga.txt");
+        write_matrix_i32(path_buf, matrix_c, opt.n);
+        join_path(path_buf, sizeof(path_buf), run_dir, "run_info.txt");
+        write_run_info(path_buf,
+                       opt.n,
+                       iteration,
+                       opt.use_random,
+                       opt.reuse_a,
+                       opt.reuse_b,
+                       overflow_seen,
+                       host_elapsed_ms,
+                       &load_stats_a,
+                       &load_stats_b,
+                       &profile);
+
+        total_cycles += profile.cycles;
+        total_host_ms += host_elapsed_ms;
+
+        print_profile_summary(&profile, &load_stats_a, &load_stats_b, iteration, host_elapsed_ms);
+
+        if (summary_fp != NULL) {
+            fprintf(summary_fp,
+                    "%d,%u,%llu,%d,0x%08X,%u,%u,%u,%u,%u,%u\n",
+                    iteration,
+                    profile.cycles,
+                    (unsigned long long)host_elapsed_ms,
+                    overflow_seen ? 1 : 0,
+                    profile.result_signature,
+                    load_stats_a.single_cmds,
+                    load_stats_a.burst_cmds,
+                    load_stats_a.zero_run_cmds,
+                    load_stats_b.single_cmds,
+                    load_stats_b.burst_cmds,
+                    load_stats_b.zero_run_cmds);
+            fflush(summary_fp);
+        }
+
+        if ((iteration + 1) == opt.iterations && opt.iterations > 1) {
+            join_path(path_buf, sizeof(path_buf), opt.out_dir, "matrix_a.txt");
+            write_matrix_i8(path_buf, matrix_a, opt.n);
+            join_path(path_buf, sizeof(path_buf), opt.out_dir, "matrix_b.txt");
+            write_matrix_i8(path_buf, matrix_b, opt.n);
+            join_path(path_buf, sizeof(path_buf), opt.out_dir, "matrix_c_fpga.txt");
+            write_matrix_i32(path_buf, matrix_c, opt.n);
+            join_path(path_buf, sizeof(path_buf), opt.out_dir, "run_info.txt");
+            write_run_info(path_buf,
+                           opt.n,
+                           iteration,
+                           opt.use_random,
+                           opt.reuse_a,
+                           opt.reuse_b,
+                           overflow_seen,
+                           host_elapsed_ms,
+                           &load_stats_a,
+                           &load_stats_b,
+                           &profile);
+        }
+    }
 
     serial_close(serial_handle);
-
-    snprintf(path_buf, sizeof(path_buf), "%s/matrix_c_fpga.txt", opt.out_dir);
-    write_matrix_i32(path_buf, matrix_c, opt.n);
-    snprintf(path_buf, sizeof(path_buf), "%s/run_info.txt", opt.out_dir);
-    write_run_info(path_buf, opt.n, cycles, overflow_seen);
+    if (summary_fp != NULL) {
+        fclose(summary_fp);
+    }
 
     printf("Wrote %s/matrix_a.txt\n", opt.out_dir);
     printf("Wrote %s/matrix_b.txt\n", opt.out_dir);
     printf("Wrote %s/matrix_c_fpga.txt\n", opt.out_dir);
-    printf("Last reported cycle count: %u\n", cycles);
-    printf("Overflow flag: %s\n", overflow_seen ? "SET" : "clear");
+    printf("Verified %d iteration(s) successfully.\n", opt.iterations);
+    printf("Aggregate cycles: %llu\n", (unsigned long long)total_cycles);
+    printf("Aggregate host time (ms): %llu\n", (unsigned long long)total_host_ms);
 
     free(matrix_a);
     free(matrix_b);
     free(matrix_c);
+    free(matrix_c_ref);
     return 0;
 }

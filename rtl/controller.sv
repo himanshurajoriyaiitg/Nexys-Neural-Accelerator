@@ -28,6 +28,7 @@ module controller #(
     output wire                    run_en,
     output wire                    busy,
     output wire                    done,
+    output wire [2:0]              debug_state,
 
     output reg  [DIM_W-1:0]        active_dim,
     output wire [ADDRW-1:0]        clear_c_addr,
@@ -86,6 +87,7 @@ module controller #(
     assign run_en = (state == ST_RUN);
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
     assign done = (state == ST_DONE);
+    assign debug_state = state;
     assign other_buf_ready = buf_sel ? buffer_ready[0] : buffer_ready[1];
     assign other_buf_will_be_ready =
         other_buf_ready || (load_pending &&

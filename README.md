@@ -35,16 +35,18 @@ This project implements a **TPU-inspired systolic array** that multiplies two si
 
 ## Key Features
 
-- Parameterized N×N systolic array (default 8×8)
+- Parameterized N×N matrix multiply with default runtime `N=32` on an `8×8` physical array
 - Diagonal (skewed) data feeding for correct wavefront timing
 - Tiled FSM controller supporting matrices larger than the physical array
 - BRAM-backed storage for A, B, and C matrices
 - DSP-mapped multiply-accumulate in every PE
 - Active-low asynchronous reset from the board's `CPU_RESETN` button
 - Full UART command/response protocol for host communication
-- PC-side C host program (Windows and Linux) for matrix send and result retrieval
+- Burst and zero-run UART loaders to reduce host-to-FPGA transfer overhead
+- PC-side C host program (Windows and Linux) with built-in result verification, batching, and BRAM reuse
 - Python checker for software-reference verification
-- 32-bit hardware cycle counter exposed over UART and LEDs
+- Hardware profiler with stage-cycle counters, overlap metrics, buffer-swap counts, and result signature
+- Stage-aware LED dashboard plus a post-run signature/health summary on the FPGA board
 
 ---
 
@@ -55,13 +57,13 @@ This project implements a **TPU-inspired systolic array** that multiplies two si
 ![Top-level data flow](docs/diagrams/top_level_data_flow.svg)
 
 1. The PC C host generates or reads matrix A and matrix B.
-2. It sends them byte-by-byte over UART using framed commands.
-3. `nexys_a7_top.v` receives the frames and writes elements into A BRAM and B BRAM.
+2. It sends them over UART using framed commands, bursts, and optional zero-run compression.
+3. `nexys_a7_top.v` receives the stream and writes elements into A BRAM and B BRAM.
 4. The host sends a START command; the controller FSM begins execution.
 5. The systolic array performs tiled multiply-accumulate over all tiles.
 6. Results accumulate into C BRAM.
-7. The host polls status, then issues a DUMP command to read matrix C back.
-8. The Python checker recomputes A×B in software and confirms correctness.
+7. The host polls status, optionally reads the hardware profiler, then issues a DUMP command to read matrix C back.
+8. The host and Python checker both recompute A×B in software and confirm correctness.
 
 ---
 
@@ -136,6 +138,11 @@ All host-to-FPGA frames are 5 bytes:
 | `0x03`   | Start multiply            | N (matrix dimension)   | 0x00              |
 | `0x04`   | Query status              | 0x0000                 | 0x00              |
 | `0x05`   | Dump C matrix             | 0x0000                 | 0x00              |
+| `0x06`   | Dump profiler             | 0x0000                 | 0x00              |
+| `0x10`   | Burst write A             | starting flat index    | burst length      |
+| `0x11`   | Burst write B             | starting flat index    | burst length      |
+| `0x12`   | Zero-run fill A           | starting flat index    | run length        |
+| `0x13`   | Zero-run fill B           | starting flat index    | run length        |
 
 FPGA responses:
 
@@ -145,6 +152,7 @@ FPGA responses:
 | `0xE0`   | ERROR         | none                                              |
 | `0xA6`   | Status packet | 5 more bytes: flags + 4-byte cycle count          |
 | `0xA7`   | Dump packet   | 2-byte N, then N×N × 4-byte signed int32 elements |
+| `0xA8`   | Profile packet | flags + N + cycle counters + signature           |
 
 ---
 
@@ -241,14 +249,14 @@ make check-sim
 Expected output:
 
 ```
-PASS: 8x8 matrix multiply matches software reference.
+PASS: 32x32 matrix multiply matches software reference.
 ```
 
 ---
 
 ### FPGA Run
 
-**Step 1 — Build the host program** (requires MSVC `cl` or MinGW `gcc`):
+**Step 1 — Build the host program** (MSVC `cl`, MinGW `gcc`, or native `gcc`/`clang` on macOS/Linux):
 
 ```
 make host 
@@ -260,6 +268,12 @@ make host
 
 ```
  .\tools\uart_host.exe --port COM8 --random --n 32 --seed 1 --out-dir fpga_output --verbose
+```
+
+Example with batching, packed uploads, and stationary A reuse:
+
+```
+ .\tools\uart_host.exe --port COM8 --random --n 32 --iterations 8 --reuse-a --out-dir fpga_output --verbose
 ```
 
 Or run with your own matrix files:
@@ -277,28 +291,48 @@ make fpga-files PORT=COM8 MATRIX_A=input_a.txt MATRIX_B=input_b.txt N=32
 Expected output:
 
 ```
-PASS: 8x8 matrix multiply matches software reference.
+PASS: 32x32 matrix multiply matches software reference.
 ```
 
 ---
 
 ## LED Status Map on fpga board 
 
-| LED        | Signal               |
-| ---------- | --------------------- | 
-| `LED[3:0]` | progress pattern     | 
-| `LED[4]`   | load buffer select     | 
-| `LED[5]`   | compute buffer select    | 
-| `LED[6]`  |  write back stage seen  | 
-| `LED[7]`  | run stage seen | 
-| `LED[8]`  | clear-acc stage seen  | 
-| `LED[9]`  | load stage seen         | 
-| `LED[10]`  | clear -c stage seen    | 
-| `LED[11]`  | UART TX avtiviy  |
-| `LED[12]`  | UART RX avtiviy       | 
-| `LED[13]`  | busy     | 
-| `LED[14]`  | done              |
-| `LED[15]`  | heartbeat         | 
+During `busy`:
+
+| LED        | Signal |
+| ---------- | ------ |
+| `LED[3:0]` | live progress / wavefront animation |
+| `LED[4]`   | clear-C stage seen for this run |
+| `LED[5]`   | preload/load stage seen for this run |
+| `LED[6]`   | clear-acc stage seen for this run |
+| `LED[7]`   | run stage seen for this run |
+| `LED[8]`   | writeback stage seen for this run |
+| `LED[9]`   | controller is currently stalled in `ST_WAIT_LOAD` |
+| `LED[10]`  | load overlap is active during run or writeback |
+| `LED[11]`  | UART TX activity |
+| `LED[12]`  | UART RX activity |
+| `LED[13]`  | core busy |
+| `LED[14]`  | overflow flag |
+| `LED[15]`  | heartbeat |
+
+After `done`:
+
+| LED        | Signal |
+| ---------- | ------ |
+| `LED[3:0]` | low nibble of the hardware result signature |
+| `LED[4]`   | done latched |
+| `LED[5]`   | overflow flag |
+| `LED[6]`   | wait-load cycles were observed |
+| `LED[7]`   | load/run overlap was observed |
+| `LED[8]`   | at least one buffer swap occurred |
+| `LED[9]`   | packed burst loader was used |
+| `LED[10]`  | zero-run loader was used |
+| `LED[11]`  | writeback stage was seen |
+| `LED[12]`  | run stage was seen |
+| `LED[13]`  | preload/load stage was seen |
+| `LED[14]`  | clear-C stage was seen |
+| `LED[15]`  | heartbeat |
 
 ---
 
@@ -317,12 +351,12 @@ Defined in `params.vh`:
 
 | Parameter           | Default          | Description                        |
 | ------------------- | ---------------- | ---------------------------------- |
-| `DEFAULT_MATRIX_N`  | 8                | Maximum supported matrix dimension |
+| `DEFAULT_MATRIX_N`  | 32               | Maximum supported matrix dimension |
 | `DEFAULT_ARRAY_N`   | 8                | Physical systolic array size       |
 | `DEFAULT_DW`        | 8                | Input data width (bits)            |
 | `DEFAULT_ACCW`      | `2×DW + log2(N)` | Accumulator width (bits)           |
 | `DEFAULT_CLK_HZ`    | 100_000_000      | Board clock frequency              |
-| `DEFAULT_UART_BAUD` | 115200           | UART baud rate                     |
+| `DEFAULT_UART_BAUD` | 921600           | UART baud rate                     |
 
 ---
 

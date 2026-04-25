@@ -23,6 +23,7 @@ module tpu_top #(
     output wire                     debug_load_active,
     output wire                     debug_writeback_active,
     output wire                     debug_clear_acc,
+    output wire [2:0]               debug_state,
     output wire                     debug_buf_sel,
     output wire                     debug_load_buf_sel,
     output wire [15:0]              debug_load_count,
@@ -30,6 +31,17 @@ module tpu_top #(
     output wire [15:0]              debug_clear_c_addr,
     output reg                      overflow_flag,
     output wire [DIM_W-1:0]         active_matrix_dim,
+    output reg  [31:0]              profile_clear_c_cycles,
+    output reg  [31:0]              profile_preload_cycles,
+    output reg  [31:0]              profile_clear_acc_cycles,
+    output reg  [31:0]              profile_run_cycles,
+    output reg  [31:0]              profile_wait_load_cycles,
+    output reg  [31:0]              profile_writeback_cycles,
+    output reg  [31:0]              profile_load_overlap_cycles,
+    output reg  [31:0]              profile_buffer_swap_count,
+    output reg  [31:0]              profile_output_tile_count,
+    output reg  [31:0]              profile_k_pass_count,
+    output reg  [31:0]              profile_result_signature,
 
     input  wire                     a_wr_en,
     input  wire                     b_wr_en,
@@ -61,6 +73,15 @@ module tpu_top #(
     localparam integer LOCAL_IDX_W    = clog2_safe(ARRAY_N);
     localparam integer LOAD_W         = clog2_safe(TILE_ELEMS + 1);
     localparam integer WB_W           = clog2_safe(TILE_ELEMS + 1);
+    localparam integer RUN_LAST       = (3 * ARRAY_N) - 3;
+    localparam [2:0] ST_IDLE          = 3'd0;
+    localparam [2:0] ST_CLEAR_C       = 3'd1;
+    localparam [2:0] ST_PRELOAD       = 3'd2;
+    localparam [2:0] ST_CLEAR_ACC     = 3'd3;
+    localparam [2:0] ST_RUN           = 3'd4;
+    localparam [2:0] ST_WAIT_LOAD     = 3'd5;
+    localparam [2:0] ST_WRITEBACK     = 3'd6;
+    localparam [2:0] ST_DONE          = 3'd7;
 
     wire clear_c_active;
     wire load_active;
@@ -81,6 +102,7 @@ module tpu_top #(
     wire [LOAD_W-1:0]      load_count;
     wire [RUN_W-1:0]       run_count;
     wire [WB_W-1:0]        wb_count;
+    wire [2:0]             controller_state;
 
     reg  [MATRIX_ADDRW-1:0] a_rd_addr;
     reg  [MATRIX_ADDRW-1:0] b_rd_addr;
@@ -108,6 +130,9 @@ module tpu_top #(
     reg  signed [DW-1:0]    b_feed [0:ARRAY_N-1];
     wire signed [ACCW-1:0]  partial_tile [0:ARRAY_N-1][0:ARRAY_N-1];
     wire                    array_overflow_any;
+    wire signed [31:0]      c_wr_data_ext;
+
+    reg                     buf_sel_prev;
 
     integer load_row_now;
     integer load_col_now;
@@ -143,6 +168,7 @@ module tpu_top #(
         .run_en           (run_en),
         .busy             (busy),
         .done             (done),
+        .debug_state      (controller_state),
         .active_dim       (active_dim),
         .clear_c_addr     (clear_c_addr),
         .tile_row         (tile_row),
@@ -165,11 +191,13 @@ module tpu_top #(
     assign debug_load_active = load_active;
     assign debug_writeback_active = writeback_active;
     assign debug_clear_acc = clear_acc;
+    assign debug_state = controller_state;
     assign debug_buf_sel = buf_sel;
     assign debug_load_buf_sel = load_buf_sel;
     assign debug_load_count = load_count;
     assign debug_wb_count = wb_count;
     assign debug_clear_c_addr = clear_c_addr;
+    assign c_wr_data_ext = {{(32-ACCW){c_wr_data[ACCW-1]}}, c_wr_data};
 
     a_bram #(
         .N     (N),
@@ -230,18 +258,100 @@ module tpu_top #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            cycle_count   <= 32'd0;
-            overflow_flag <= 1'b0;
-        end else if (start && !busy) begin
-            cycle_count   <= 32'd0;
-            overflow_flag <= 1'b0;
-        end else if (busy) begin
-            cycle_count <= cycle_count + 1'b1;
-            if (array_overflow_any) begin
-                overflow_flag <= 1'b1;
+            cycle_count                  <= 32'd0;
+            overflow_flag                <= 1'b0;
+            profile_clear_c_cycles       <= 32'd0;
+            profile_preload_cycles       <= 32'd0;
+            profile_clear_acc_cycles     <= 32'd0;
+            profile_run_cycles           <= 32'd0;
+            profile_wait_load_cycles     <= 32'd0;
+            profile_writeback_cycles     <= 32'd0;
+            profile_load_overlap_cycles  <= 32'd0;
+            profile_buffer_swap_count    <= 32'd0;
+            profile_output_tile_count    <= 32'd0;
+            profile_k_pass_count         <= 32'd0;
+            profile_result_signature     <= 32'd0;
+            buf_sel_prev                 <= 1'b0;
+        end else begin
+            buf_sel_prev <= buf_sel;
+
+            if (start && !busy) begin
+                cycle_count                  <= 32'd0;
+                overflow_flag                <= 1'b0;
+                profile_clear_c_cycles       <= 32'd0;
+                profile_preload_cycles       <= 32'd0;
+                profile_clear_acc_cycles     <= 32'd0;
+                profile_run_cycles           <= 32'd0;
+                profile_wait_load_cycles     <= 32'd0;
+                profile_writeback_cycles     <= 32'd0;
+                profile_load_overlap_cycles  <= 32'd0;
+                profile_buffer_swap_count    <= 32'd0;
+                profile_output_tile_count    <= 32'd0;
+                profile_k_pass_count         <= 32'd0;
+                profile_result_signature     <= 32'd0;
+                buf_sel_prev                 <= buf_sel;
+            end else begin
+                if (busy) begin
+                    cycle_count <= cycle_count + 1'b1;
+
+                    case (controller_state)
+                        ST_CLEAR_C: begin
+                            profile_clear_c_cycles <= profile_clear_c_cycles + 1'b1;
+                        end
+
+                        ST_PRELOAD: begin
+                            profile_preload_cycles <= profile_preload_cycles + 1'b1;
+                        end
+
+                        ST_CLEAR_ACC: begin
+                            profile_clear_acc_cycles <= profile_clear_acc_cycles + 1'b1;
+                        end
+
+                        ST_RUN: begin
+                            profile_run_cycles <= profile_run_cycles + 1'b1;
+                        end
+
+                        ST_WAIT_LOAD: begin
+                            profile_wait_load_cycles <= profile_wait_load_cycles + 1'b1;
+                        end
+
+                        ST_WRITEBACK: begin
+                            profile_writeback_cycles <= profile_writeback_cycles + 1'b1;
+                        end
+
+                        default: begin
+                        end
+                    endcase
+
+                    if (load_active &&
+                        ((controller_state == ST_RUN) || (controller_state == ST_WRITEBACK))) begin
+                        profile_load_overlap_cycles <= profile_load_overlap_cycles + 1'b1;
+                    end
+
+                    if (buf_sel != buf_sel_prev) begin
+                        profile_buffer_swap_count <= profile_buffer_swap_count + 1'b1;
+                    end
+
+                    if (run_en && (run_count == RUN_LAST)) begin
+                        profile_k_pass_count <= profile_k_pass_count + 1'b1;
+                    end
+
+                    if (writeback_active && (wb_count == (TILE_ELEMS - 1))) begin
+                        profile_output_tile_count <= profile_output_tile_count + 1'b1;
+                    end
+                end
+
+                if (writeback_active && c_wr_en) begin
+                    profile_result_signature <=
+                        {profile_result_signature[26:0], profile_result_signature[31:27]} ^
+                        c_wr_data_ext ^
+                        {16'd0, c_wr_addr};
+                end
+
+                if (array_overflow_any) begin
+                    overflow_flag <= 1'b1;
+                end
             end
-        end else if (array_overflow_any) begin
-            overflow_flag <= 1'b1;
         end
     end
 
