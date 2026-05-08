@@ -1,3 +1,61 @@
+# Project Overview
+
+The FPGA design exposes two hardware compute paths:
+
+1. Matrix accelerator path:
+   PC host -> UART -> A/B/Bias memories -> tiled systolic array -> C memory -> UART dump.
+2. SNN recognizer path:
+   PC/iPad image -> UART image upload -> `snn_core` -> prediction -> UART status/display.
+
+The software tools also support local-only recognizer modes for development,
+testing, and comparison before using the board.
+
+## Key Features
+
+- Parameterized signed 8-bit matrix multiply with 32-bit-style accumulation.
+- Default maximum matrix size: `N=32`.
+- Default physical array size: `ARRAY_N=8`.
+- Tiled execution for matrices larger than 8x8.
+- Optional bias addition.
+- Optional activation: `NONE`, `RELU`, `LEAKY_RELU`.
+- Optional 2x2 max pooling.
+- UART host support for random matrices, file matrices, batching, reuse, packed bursts, and zero-run compression.
+- Python checker for simulation and FPGA output.
+- CNN-style handwritten digit/character recognition using the matrix accelerator.
+- SNN inference path using `snn_core` and `snn_weights`.
+- Browser/iPad drawing demo.
+- Vivado project generation through Tcl.
+
+## Requirements
+
+Install these before running the full project:
+
+```powershell
+pip install numpy pillow scipy pyserial scikit-learn
+```
+
+For FPGA modes you also need:
+
+- Vivado installed and available as `vivado` or `vivado.bat`.
+- Nexys A7-100T connected over USB.
+- A C compiler for the host program: Visual Studio Build Tools `cl` or MinGW/GCC.
+- `make` if you want to use the Makefile shortcuts.
+
+To find the FPGA serial port on Windows:
+
+```powershell
+Get-PnpDevice -Class Ports
+```
+
+On Linux, check:
+
+```bash
+ls /dev/ttyUSB* /dev/ttyACM*
+```
+
+Use the discovered port wherever this README shows `COM8`.
+
+
 # Recognizer Run Guide
 
 This file shows only how to run the recognizer in the three required modes:
