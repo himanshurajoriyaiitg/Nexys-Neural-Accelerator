@@ -177,4 +177,178 @@ For UI testing without the FPGA, run:
 make ipad-demo MODEL=cnn BACKEND=software HOST=0.0.0.0 WEB_PORT=8000
 ```
 
+## FPGA LED Mapping
+When the recognizer sends `CMD_SET_LED_CODE`, the board displays the predicted label/code:
+
+| Output | Meaning |
+| --- | --- |
+| `LED[7:0]` | Predicted digit/character code sent by software. |
+| `LED[8]` | Valid prediction code is present. |
+| `LED[9]` | Done/status indicator. |
+| `LED[10]` | Overflow flag from the matrix accelerator path. |
+| `LED[11]` | UART transmit activity. |
+| `LED[12]` | UART receive activity. |
+| `LED[13]` | Recent busy activity. |
+| `LED[14]` | Matrix run/load/writeback activity was seen. |
+| `LED[15]` | Heartbeat. |
+| Seven-segment display | Shows the prediction code when available. |
+
+
+# Data Flow
+## Overall System Data Flow
+```mermaid
+flowchart LR
+    User[User input] --> Tools[Python and C host tools]
+    Tools --> Mode{Selected path}
+
+    Mode --> Matmul[Matrix multiplication path]
+    Mode --> Recog[Recognizer path]
+
+    Matmul --> UART[UART command frames]
+    Recog --> Soft[Software inference]
+    Recog --> UART
+
+    UART --> FPGA[nexys_a7_top.v]
+    FPGA --> TPU[tpu_top.sv matrix accelerator]
+    FPGA --> SNN[snn_core.sv]
+
+    TPU --> MatResult[Matrix C result]
+    SNN --> SnnResult[SNN prediction]
+    Soft --> SoftResult[Software prediction]
+
+    MatResult --> HostCheck[Host verification / output files]
+    SnnResult --> HostUI[PC or iPad UI]
+    SoftResult --> HostUI
+    FPGA --> BoardDisplay[LEDs and seven-segment display]
+```
+
+## 2. Matrix Multiplication Path
+
+### Matrix Multiplication Top-Level Flow
+
+```mermaid
+flowchart TD
+    InputA[Matrix A input] --> Host[Host program]
+    InputB[Matrix B input] --> Host
+    Bias[Optional bias vector] --> Host
+    Modes[Mode options: bias, activation, pool] --> Host
+
+    Host --> Frames[UART frames]
+    Frames --> Top[nexys_a7_top.v command parser]
+
+    Top --> AMem[A BRAM write]
+    Top --> BMem[B BRAM write]
+    Top --> BiasMem[Bias memory write]
+    Top --> Start[CMD_START with N and mode bits]
+
+    Start --> TPU[tpu_top.sv]
+    AMem --> TPU
+    BMem --> TPU
+    BiasMem --> TPU
+
+    TPU --> Controller[controller.sv FSM]
+    Controller --> Array[systolic_array.sv]
+    Array --> Post[Optional bias, activation, pool]
+    Post --> CMem[C BRAM]
+
+    CMem --> Dump[CMD_DUMP_C over UART]
+    Dump --> Host
+    Host --> Files[fpga_output files]
+    Files --> Check[tools/check_output.py]
+    Check --> PassFail[PASS / FAIL]
+```
+
+### Matrix Accelerator Internal Data Flow
+
+```mermaid
+flowchart LR
+    Cmd[UART command parser] --> AWrite[a_wr_en / a_wr_addr / a_wr_data]
+    Cmd --> BWrite[b_wr_en / b_wr_addr / b_wr_data]
+    Cmd --> BiasWrite[bias_wr_en / bias_wr_addr / bias_wr_data]
+    Cmd --> Start[start, matrix_dim, act_mode, enable_bias, enable_pool]
+
+    AWrite --> ABRAM[a_bram.v]
+    BWrite --> BBRAM[b_bram.v]
+    BiasWrite --> BiasRAM[bias_mem in tpu_top.sv]
+
+    Start --> Ctrl[controller.sv]
+    Ctrl --> Load[Tile load]
+    Load --> ABRAM
+    Load --> BBRAM
+
+    ABRAM --> FeedA[A row feed]
+    BBRAM --> FeedB[B column feed]
+    FeedA --> Array[systolic_array.sv]
+    FeedB --> Array
+
+    Ctrl --> ClearAcc[clear_acc]
+    Ctrl --> Run[run_en]
+    ClearAcc --> Array
+    Run --> Array
+
+    Array --> Accum[PE accumulated tile result]
+    Accum --> Modes[Bias / activation / pool logic]
+    BiasRAM --> Modes
+    Modes --> CBRAM[c_bram.v]
+    CBRAM --> Readback[c_host_rd_data]
+```
+
+
+### Systolic Array and Diagonal Dataflow
+
+The array is an ARRAY_N × ARRAY_N mesh of processing elements. Inputs are **skewed** so that each diagonal of A and B arrives at the correct PE at the correct clock cycle.
+
+```
+Cycle 0:   A[0][0] enters row 0,  B[0][0] enters col 0
+Cycle 1:   A[0][1] enters row 0,  A[1][0] enters row 1
+           B[1][0] enters col 0,  B[0][1] enters col 1
+Cycle 2:   All diagonals shift one step further right / down
+...
+```
+Data flow inside the mesh (4×4 example):
+
+![Systolic Array](docs/diagrams/systolic_array_diagonal_dataflow.svg)
+
+A values flow RIGHT (horizontally), forwarded by each PE.
+B values flow DOWN  (vertically),  forwarded by each PE.
+Each PE accumulates:  acc += a_in × b_in
+
+After `(2 × ARRAY_N − 1)` run cycles the last diagonal has drained and every PE holds its final partial sum. The controller then reads out all accumulator values and writes them to C BRAM.
+
+For matrices larger than ARRAY_N the controller tiles the computation: it loops over `tile_row`, `tile_col`, and `tile_k`, clearing the PE accumulators between tiles and accumulating partial results into C BRAM.
+
+---
+
+A values move horizontally across each row. B values move vertically down each column. Each PE performs:
+
+```text
+accumulator = accumulator + a_in * b_in
+```
+
+
+## FPGA Recognizer With iPad
+
+```mermaid
+flowchart TD
+    IPad[iPad browser canvas] --> HTTP[HTTP request to laptop server]
+    HTTP --> Server[tools/ipad_fpga_digit_demo.py]
+    Server --> Pre[Server-side preprocessing]
+    Pre --> Model{CNN or SNN}
+
+    Model -->|CNN FPGA| CnnBackend[FPGA CNN backend]
+    CnnBackend --> UARTMat[UART matrix accelerator commands]
+    UARTMat --> TPU[tpu_top.sv]
+    TPU --> UARTMatResult[UART matrix result]
+    UARTMatResult --> Server
+
+    Model -->|SNN FPGA| SnnBackend[FPGA SNN backend]
+    SnnBackend --> UARTImg[UART image pixel commands]
+    UARTImg --> SNN[snn_core.sv]
+    SNN --> UARTPred[UART prediction status]
+    UARTPred --> Server
+
+    Server --> Response[Prediction response]
+    Response --> IPad
+    Server --> BoardDisplay[Optional board display code]
+```
 
