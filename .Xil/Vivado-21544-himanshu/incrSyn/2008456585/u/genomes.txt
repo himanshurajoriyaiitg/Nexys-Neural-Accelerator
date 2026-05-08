@@ -1,0 +1,4 @@
+systolic_array__GB0
+systolic_array__GB1
+tpu_top__GC0
+nexys_a7_top__GC0

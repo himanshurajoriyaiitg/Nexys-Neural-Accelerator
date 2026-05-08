@@ -18,6 +18,9 @@ module tb_tpu_top;
     reg clk;
     reg rst_n;
     reg start;
+    reg [1:0] act_mode;
+    reg enable_bias;
+    reg enable_pool;
     reg [DIM_W-1:0] matrix_dim;
     wire busy;
     wire done;
@@ -28,10 +31,13 @@ module tb_tpu_top;
 
     reg  a_wr_en;
     reg  b_wr_en;
+    reg  bias_wr_en;
     reg  [ADDRW-1:0] a_wr_addr;
     reg  [ADDRW-1:0] b_wr_addr;
+    reg  [DIM_W-1:0] bias_wr_addr;
     reg  signed [DW-1:0] a_wr_data;
     reg  signed [DW-1:0] b_wr_data;
+    reg  signed [DW-1:0] bias_wr_data;
     reg  [ADDRW-1:0] c_host_rd_addr;
     wire signed [ACCW-1:0] c_host_rd_data;
 
@@ -54,11 +60,18 @@ module tb_tpu_top;
     integer rand_a;
     integer rand_b;
     integer rng_state;
+    integer bias_seed;
+    integer mode_bias_enable;
+    integer mode_pool_enable;
+    integer mode_act_mode;
+    integer out_dim;
     string  output_dir;
 
     reg signed [DW-1:0]   mat_a [0:MAX_DEPTH-1];
     reg signed [DW-1:0]   mat_b [0:MAX_DEPTH-1];
+    reg signed [DW-1:0]   bias_vec [0:MAX_N-1];
     integer               mat_c_hw [0:MAX_DEPTH-1];
+    integer               mat_c_stage [0:MAX_DEPTH-1];
     integer               mat_c_ref [0:MAX_DEPTH-1];
 
     tpu_top #(
@@ -73,6 +86,9 @@ module tb_tpu_top;
         .clk              (clk),
         .rst_n            (rst_n),
         .start            (start),
+        .act_mode         (act_mode),
+        .enable_bias      (enable_bias),
+        .enable_pool      (enable_pool),
         .matrix_dim       (matrix_dim),
         .busy             (busy),
         .done             (done),
@@ -82,10 +98,13 @@ module tb_tpu_top;
         .active_matrix_dim(active_matrix_dim),
         .a_wr_en          (a_wr_en),
         .b_wr_en          (b_wr_en),
+        .bias_wr_en       (bias_wr_en),
         .a_wr_addr        (a_wr_addr),
         .b_wr_addr        (b_wr_addr),
+        .bias_wr_addr     (bias_wr_addr),
         .a_wr_data        (a_wr_data),
         .b_wr_data        (b_wr_data),
+        .bias_wr_data     (bias_wr_data),
         .c_host_rd_addr   (c_host_rd_addr),
         .c_host_rd_data   (c_host_rd_data)
     );
@@ -98,7 +117,11 @@ module tb_tpu_top;
                 mat_a[idx]     = '0;
                 mat_b[idx]     = '0;
                 mat_c_hw[idx]  = 0;
+                mat_c_stage[idx] = 0;
                 mat_c_ref[idx] = 0;
+            end
+            for (idx = 0; idx < MAX_N; idx = idx + 1) begin
+                bias_vec[idx] = '0;
             end
         end
     endtask
@@ -117,17 +140,96 @@ module tb_tpu_top;
         end
     endtask
 
+    task automatic randomize_bias;
+        input integer n;
+        input integer seed_value;
+        begin
+            rng_state = seed_value;
+            for (idx = 0; idx < n; idx = idx + 1) begin
+                rand_a       = $random(rng_state);
+                bias_vec[idx] = rand_a[DW-1:0];
+            end
+            for (idx = n; idx < MAX_N; idx = idx + 1) begin
+                bias_vec[idx] = '0;
+            end
+        end
+    endtask
+
+    function automatic integer apply_activation;
+        input integer value;
+        input [1:0] mode;
+        begin
+            case (mode)
+                2'b01: begin
+                    if (value > 0) begin
+                        apply_activation = value;
+                    end else begin
+                        apply_activation = 0;
+                    end
+                end
+
+                2'b10: begin
+                    if (value > 0) begin
+                        apply_activation = value;
+                    end else begin
+                        apply_activation = value >>> 2;
+                    end
+                end
+
+                default: begin
+                    apply_activation = value;
+                end
+            endcase
+        end
+    endfunction
+
     task automatic compute_reference;
         input integer n;
         integer sum_val;
+        integer full_idx;
+        integer pool_max;
         begin
+            for (idx = 0; idx < MAX_DEPTH; idx = idx + 1) begin
+                mat_c_stage[idx] = 0;
+                mat_c_ref[idx]   = 0;
+            end
+
             for (r = 0; r < n; r = r + 1) begin
                 for (c = 0; c < n; c = c + 1) begin
                     sum_val = 0;
                     for (k = 0; k < n; k = k + 1) begin
                         sum_val = sum_val + (mat_a[r*n + k] * mat_b[k*n + c]);
                     end
-                    mat_c_ref[r*n + c] = sum_val;
+
+                    if (enable_bias) begin
+                        sum_val = sum_val + bias_vec[c];
+                    end
+
+                    sum_val = apply_activation(sum_val, act_mode);
+                    mat_c_stage[r*n + c] = sum_val;
+                end
+            end
+
+            if (enable_pool) begin
+                for (r = 0; r < (n / 2); r = r + 1) begin
+                    for (c = 0; c < (n / 2); c = c + 1) begin
+                        full_idx = (2 * r * n) + (2 * c);
+                        pool_max = mat_c_stage[full_idx];
+                        if (mat_c_stage[full_idx + 1] > pool_max) begin
+                            pool_max = mat_c_stage[full_idx + 1];
+                        end
+                        if (mat_c_stage[full_idx + n] > pool_max) begin
+                            pool_max = mat_c_stage[full_idx + n];
+                        end
+                        if (mat_c_stage[full_idx + n + 1] > pool_max) begin
+                            pool_max = mat_c_stage[full_idx + n + 1];
+                        end
+                        mat_c_ref[r*(n/2) + c] = pool_max;
+                    end
+                end
+            end else begin
+                for (idx = 0; idx < (n * n); idx = idx + 1) begin
+                    mat_c_ref[idx] = mat_c_stage[idx];
                 end
             end
         end
@@ -154,6 +256,25 @@ module tb_tpu_top;
             b_wr_addr = '0;
             a_wr_data = '0;
             b_wr_data = '0;
+            @(posedge clk);
+        end
+    endtask
+
+    task automatic write_bias_to_dut;
+        input integer n;
+        begin
+            for (idx = 0; idx < n; idx = idx + 1) begin
+                @(negedge clk);
+                bias_wr_en   = 1'b1;
+                bias_wr_addr = idx[DIM_W-1:0];
+                bias_wr_data = bias_vec[idx];
+                @(posedge clk);
+            end
+
+            @(negedge clk);
+            bias_wr_en   = 1'b0;
+            bias_wr_addr = '0;
+            bias_wr_data = '0;
             @(posedge clk);
         end
     endtask
@@ -297,6 +418,21 @@ module tb_tpu_top;
         end
     endtask
 
+    task automatic dump_bias_vector;
+        input integer n;
+        begin
+            open_output_file(file_b, "bias.txt");
+            for (c = 0; c < n; c = c + 1) begin
+                $fwrite(file_b, "%0d", bias_vec[c]);
+                if (c != (n - 1)) begin
+                    $fwrite(file_b, " ");
+                end
+            end
+            $fwrite(file_b, "\n");
+            $fclose(file_b);
+        end
+    endtask
+
     task automatic dump_matrix_c;
         input integer n;
         begin
@@ -326,6 +462,10 @@ module tb_tpu_top;
             $fwrite(file_meta, "DATA_W=%0d\n", DW);
             $fwrite(file_meta, "ACC_W=%0d\n", ACCW);
             $fwrite(file_meta, "SEED=%0d\n", seed_value);
+            $fwrite(file_meta, "BIAS=%0d\n", enable_bias ? 1 : 0);
+            $fwrite(file_meta, "POOL=%0d\n", enable_pool ? 1 : 0);
+            $fwrite(file_meta, "ACT_MODE=%0d\n", act_mode);
+            $fwrite(file_meta, "OUTPUT_DIM=%0d\n", out_dim);
             $fwrite(file_meta, "CYCLES=%0d\n", cycle_count);
             $fclose(file_meta);
         end
@@ -343,6 +483,10 @@ module tb_tpu_top;
             $fwrite(file_case, "DATA_W=%0d\n", DW);
             $fwrite(file_case, "ACC_W=%0d\n", ACCW);
             $fwrite(file_case, "SEED=%0d\n", seed_value);
+            $fwrite(file_case, "BIAS=%0d\n", enable_bias ? 1 : 0);
+            $fwrite(file_case, "POOL=%0d\n", enable_pool ? 1 : 0);
+            $fwrite(file_case, "ACT_MODE=%0d\n", act_mode);
+            $fwrite(file_case, "OUTPUT_DIM=%0d\n", out_dim);
             $fwrite(file_case, "CYCLES=%0d\n", cycle_count);
 
             $fwrite(file_case, "BEGIN_MATRIX_A\n");
@@ -369,11 +513,23 @@ module tb_tpu_top;
             end
             $fwrite(file_case, "END_MATRIX_B\n");
 
-            $fwrite(file_case, "BEGIN_MATRIX_C\n");
-            for (r = 0; r < n; r = r + 1) begin
+            if (enable_bias) begin
+                $fwrite(file_case, "BEGIN_BIAS\n");
                 for (c = 0; c < n; c = c + 1) begin
-                    $fwrite(file_case, "%0d", mat_c_hw[r*n + c]);
+                    $fwrite(file_case, "%0d", bias_vec[c]);
                     if (c != (n - 1)) begin
+                        $fwrite(file_case, " ");
+                    end
+                end
+                $fwrite(file_case, "\n");
+                $fwrite(file_case, "END_BIAS\n");
+            end
+
+            $fwrite(file_case, "BEGIN_MATRIX_C\n");
+            for (r = 0; r < out_dim; r = r + 1) begin
+                for (c = 0; c < out_dim; c = c + 1) begin
+                    $fwrite(file_case, "%0d", mat_c_hw[r*out_dim + c]);
+                    if (c != (out_dim - 1)) begin
                         $fwrite(file_case, " ");
                     end
                 end
@@ -422,13 +578,19 @@ module tb_tpu_top;
         clk                = 1'b0;
         rst_n              = 1'b0;
         start              = 1'b0;
+        act_mode           = 2'b00;
+        enable_bias        = 1'b0;
+        enable_pool        = 1'b0;
         matrix_dim         = '0;
         a_wr_en            = 1'b0;
         b_wr_en            = 1'b0;
+        bias_wr_en         = 1'b0;
         a_wr_addr          = '0;
         b_wr_addr          = '0;
+        bias_wr_addr       = '0;
         a_wr_data          = '0;
         b_wr_data          = '0;
+        bias_wr_data       = '0;
         c_host_rd_addr     = '0;
         runtime_dim        = DEFAULT_SIM_N;
         runtime_seed       = DEFAULT_SIM_SEED;
@@ -438,12 +600,28 @@ module tb_tpu_top;
         first_mismatch_r   = -1;
         first_mismatch_c   = -1;
         output_dir         = "sim/output";
+        bias_seed          = DEFAULT_SIM_SEED ^ 32'h13579BDF;
+        mode_bias_enable   = 0;
+        mode_pool_enable   = 0;
+        mode_act_mode      = 0;
 
         if ($value$plusargs("matrix_dim=%d", runtime_dim)) begin
             $display("Using runtime matrix_dim=%0d", runtime_dim);
         end
         if ($value$plusargs("seed=%d", runtime_seed)) begin
             $display("Using runtime seed=%0d", runtime_seed);
+        end
+        if ($value$plusargs("bias_seed=%d", bias_seed)) begin
+            $display("Using runtime bias_seed=%0d", bias_seed);
+        end
+        if ($value$plusargs("bias=%d", mode_bias_enable)) begin
+            $display("Using runtime bias=%0d", mode_bias_enable);
+        end
+        if ($value$plusargs("pool=%d", mode_pool_enable)) begin
+            $display("Using runtime pool=%0d", mode_pool_enable);
+        end
+        if ($value$plusargs("act=%d", mode_act_mode)) begin
+            $display("Using runtime act=%0d", mode_act_mode);
         end
         if ($value$plusargs("out_dir=%s", output_dir)) begin
             $display("Using runtime out_dir=%s", output_dir);
@@ -452,21 +630,39 @@ module tb_tpu_top;
         if ((runtime_dim < 1) || (runtime_dim > MAX_N)) begin
             $fatal(1, "matrix_dim must satisfy 1 <= matrix_dim <= %0d", MAX_N);
         end
+        if ((mode_act_mode < 0) || (mode_act_mode > 2)) begin
+            $fatal(1, "act must be 0 (NONE), 1 (RELU), or 2 (LEAKY_RELU)");
+        end
+        if ((mode_pool_enable != 0) && ((runtime_dim % 2) != 0)) begin
+            $fatal(1, "matrix_dim must be even when pool=1");
+        end
 
+        enable_bias = (mode_bias_enable != 0);
+        enable_pool = (mode_pool_enable != 0);
+        act_mode    = mode_act_mode[1:0];
         matrix_dim = runtime_dim[DIM_W-1:0];
+        out_dim    = enable_pool ? (runtime_dim / 2) : runtime_dim;
 
         clear_storage();
         randomize_inputs(runtime_dim, runtime_seed);
+        if (enable_bias) begin
+            randomize_bias(runtime_dim, bias_seed);
+        end
         compute_reference(runtime_dim);
 
         repeat (5) @(posedge clk);
         rst_n = 1'b1;
         @(posedge clk);
 
-        $display("Writing matrices into DUT for N=%0d with ARRAY_N=%0d", runtime_dim, ARRAY_N);
+        $display("Writing matrices into DUT for N=%0d with ARRAY_N=%0d bias=%0d act=%0d pool=%0d",
+                 runtime_dim, ARRAY_N, enable_bias, act_mode, enable_pool);
         write_inputs_to_dut(runtime_dim);
         dump_matrix_a(runtime_dim);
         dump_matrix_b(runtime_dim);
+        if (enable_bias) begin
+            write_bias_to_dut(runtime_dim);
+            dump_bias_vector(runtime_dim);
+        end
 
         $display("Starting tiled matmul");
         start_core();
@@ -474,14 +670,14 @@ module tb_tpu_top;
         active_dim_seen = active_matrix_dim;
 
         $display("Reading DUT output. cycle_count=%0d active_dim=%0d", cycle_count, active_dim_seen);
-        read_hw_result(runtime_dim);
-        dump_matrix_c(runtime_dim);
+        read_hw_result(out_dim);
+        dump_matrix_c(out_dim);
         dump_run_info(runtime_dim, runtime_seed);
         dump_combined_case(runtime_dim, runtime_seed);
-        compare_hw_vs_ref(runtime_dim);
+        compare_hw_vs_ref(out_dim);
 
-        $display("PASS: tiled matrix multiply completed in %0d cycles for N=%0d using ARRAY_N=%0d",
-                 cycle_count, runtime_dim, ARRAY_N);
+        $display("PASS: tiled matrix multiply completed in %0d cycles for N=%0d using ARRAY_N=%0d bias=%0d act=%0d pool=%0d",
+                 cycle_count, runtime_dim, ARRAY_N, enable_bias, act_mode, enable_pool);
         $finish;
     end
 

@@ -29,6 +29,7 @@
 #define CMD_STATUS  0x04
 #define CMD_DUMP_C  0x05
 #define CMD_PROFILE 0x06
+#define CMD_WRITE_BIAS 0x07
 #define CMD_WRITE_A_BURST 0x10
 #define CMD_WRITE_B_BURST 0x11
 #define CMD_ZERO_A_RUN    0x12
@@ -47,19 +48,26 @@
 #define PROFILE_PACKET_BYTES 52u
 #define BURST_MAX_BYTES 255u
 #define ZERO_RUN_THRESHOLD 4u
+#define ACT_NONE 0
+#define ACT_RELU 1
+#define ACT_LEAKY_RELU 2
 
 struct options {
     const char *port;
     const char *matrix_a_path;
     const char *matrix_b_path;
+    const char *bias_vec_path;
     const char *out_dir;
     int n;
     int baud;
     int iterations;
     int timeout_ms;
+    int activation;
     unsigned int seed;
     bool use_random;
     bool seed_given;
+    bool bias;
+    bool pool;
     bool reuse_a;
     bool reuse_b;
     bool disable_pack;
@@ -105,8 +113,8 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s --port <serial> --random [--n 32] [--seed 1] [--iterations 4] [--reuse-a] [--reuse-b] [--baud 921600] [--out-dir fpga_output] [--no-pack] [--verbose]\n"
-            "  %s --port <serial> --matrix-a <file> --matrix-b <file> [--n 32] [--iterations 4] [--reuse-a] [--reuse-b] [--baud 921600] [--out-dir fpga_output] [--no-pack] [--verbose]\n",
+            "  %s --port <serial> --random [--n 32] [--seed 1] [--bias] [--activation NONE|RELU|LEAKY_RELU] [--pool] [--iterations 4] [--reuse-a] [--reuse-b] [--baud 921600] [--out-dir fpga_output] [--no-pack] [--verbose]\n"
+            "  %s --port <serial> --matrix-a <file> --matrix-b <file> [--bias --bias-vec <file>] [--activation NONE|RELU|LEAKY_RELU] [--pool] [--n 32] [--iterations 4] [--reuse-a] [--reuse-b] [--baud 921600] [--out-dir fpga_output] [--no-pack] [--verbose]\n",
             prog, prog);
 }
 
@@ -130,6 +138,22 @@ static void log_msg(bool verbose, const char *msg)
     }
 }
 
+static int parse_activation_name(const char *name)
+{
+    if (strcmp(name, "NONE") == 0) {
+        return ACT_NONE;
+    }
+    if (strcmp(name, "RELU") == 0) {
+        return ACT_RELU;
+    }
+    if (strcmp(name, "LEAKY_RELU") == 0) {
+        return ACT_LEAKY_RELU;
+    }
+
+    fail_msg("Activation must be NONE, RELU, or LEAKY_RELU.");
+    return ACT_NONE;
+}
+
 static uint32_t next_rand_u32(unsigned int *seed)
 {
     *seed = (*seed * 1103515245u) + 12345u;
@@ -146,6 +170,7 @@ static void parse_args(int argc, char **argv, struct options *opt)
     opt->iterations = DEFAULT_ITERATIONS;
     opt->timeout_ms = 30000;
     opt->out_dir = "fpga_output";
+    opt->activation = ACT_NONE;
 
     for (i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--port") == 0 && (i + 1) < argc) {
@@ -154,6 +179,8 @@ static void parse_args(int argc, char **argv, struct options *opt)
             opt->matrix_a_path = argv[++i];
         } else if (strcmp(argv[i], "--matrix-b") == 0 && (i + 1) < argc) {
             opt->matrix_b_path = argv[++i];
+        } else if (strcmp(argv[i], "--bias-vec") == 0 && (i + 1) < argc) {
+            opt->bias_vec_path = argv[++i];
         } else if (strcmp(argv[i], "--out-dir") == 0 && (i + 1) < argc) {
             opt->out_dir = argv[++i];
         } else if (strcmp(argv[i], "--n") == 0 && (i + 1) < argc) {
@@ -169,6 +196,12 @@ static void parse_args(int argc, char **argv, struct options *opt)
             opt->seed_given = true;
         } else if (strcmp(argv[i], "--random") == 0) {
             opt->use_random = true;
+        } else if (strcmp(argv[i], "--bias") == 0) {
+            opt->bias = true;
+        } else if (strcmp(argv[i], "--pool") == 0) {
+            opt->pool = true;
+        } else if (strcmp(argv[i], "--activation") == 0 && (i + 1) < argc) {
+            opt->activation = parse_activation_name(argv[++i]);
         } else if (strcmp(argv[i], "--reuse-a") == 0) {
             opt->reuse_a = true;
         } else if (strcmp(argv[i], "--reuse-b") == 0) {
@@ -198,6 +231,10 @@ static void parse_args(int argc, char **argv, struct options *opt)
 
     if (((unsigned int)opt->n * (unsigned int)opt->n) > MAX_MATRIX_ELEMS) {
         fail_msg("Runtime N is too large for the 16-bit UART address field.");
+    }
+
+    if (opt->pool && ((opt->n % 2) != 0)) {
+        fail_msg("Max pooling requires an even runtime N.");
     }
 
     if (!opt->use_random && (opt->matrix_a_path == NULL || opt->matrix_b_path == NULL)) {
@@ -265,6 +302,32 @@ static void read_matrix_file(const char *path, int8_t *mat, int n)
     }
 }
 
+static void read_vector_file(const char *path, int8_t *vec, int n)
+{
+    FILE *fp;
+    int idx = 0;
+    int value;
+
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        fail(path);
+    }
+
+    while (idx < n && fscanf(fp, "%d", &value) == 1) {
+        if (value < -128 || value > 127) {
+            fclose(fp);
+            fail_msg("Bias file value out of signed 8-bit range.");
+        }
+        vec[idx++] = (int8_t)value;
+    }
+
+    fclose(fp);
+
+    if (idx != n) {
+        fail_msg("Bias file does not contain exactly N values.");
+    }
+}
+
 static void write_matrix_i8(const char *path, const int8_t *mat, int n)
 {
     FILE *fp;
@@ -285,6 +348,27 @@ static void write_matrix_i8(const char *path, const int8_t *mat, int n)
         }
         fputc('\n', fp);
     }
+
+    fclose(fp);
+}
+
+static void write_vector_i8(const char *path, const int8_t *vec, int n)
+{
+    FILE *fp;
+    int idx;
+
+    fp = fopen(path, "w");
+    if (fp == NULL) {
+        fail(path);
+    }
+
+    for (idx = 0; idx < n; ++idx) {
+        fprintf(fp, "%d", (int)vec[idx]);
+        if (idx != (n - 1)) {
+            fputc(' ', fp);
+        }
+    }
+    fputc('\n', fp);
 
     fclose(fp);
 }
@@ -313,11 +397,45 @@ static void write_matrix_i32(const char *path, const int32_t *mat, int n)
     fclose(fp);
 }
 
-static void compute_reference(const int8_t *matrix_a, const int8_t *matrix_b, int32_t *matrix_c_ref, int n)
+static int output_dim_for_mode(int n, bool pool)
+{
+    return pool ? (n / 2) : n;
+}
+
+static int32_t apply_activation_i32(int32_t value, int activation)
+{
+    if (activation == ACT_RELU) {
+        return (value > 0) ? value : 0;
+    }
+    if (activation == ACT_LEAKY_RELU) {
+        return (value > 0) ? value : (value >> 2);
+    }
+    return value;
+}
+
+static void random_vector(int8_t *vec, int n, unsigned int *seed)
+{
+    int idx;
+
+    for (idx = 0; idx < n; ++idx) {
+        vec[idx] = (int8_t)((next_rand_u32(seed) % 256u) - 128);
+    }
+}
+
+static void compute_reference(const int8_t *matrix_a,
+                              const int8_t *matrix_b,
+                              const int8_t *bias,
+                              int32_t *matrix_c_ref,
+                              int32_t *matrix_c_stage,
+                              int n,
+                              bool enable_bias,
+                              int activation,
+                              bool pool)
 {
     int r;
     int c;
     int k;
+    int out_n = output_dim_for_mode(n, pool);
 
     for (r = 0; r < n; ++r) {
         for (c = 0; c < n; ++c) {
@@ -325,7 +443,36 @@ static void compute_reference(const int8_t *matrix_a, const int8_t *matrix_b, in
             for (k = 0; k < n; ++k) {
                 total += (int32_t)matrix_a[(r * n) + k] * (int32_t)matrix_b[(k * n) + c];
             }
-            matrix_c_ref[(r * n) + c] = total;
+            if (enable_bias) {
+                total += (int32_t)bias[c];
+            }
+            matrix_c_stage[(r * n) + c] = apply_activation_i32(total, activation);
+        }
+    }
+
+    if (pool) {
+        for (r = 0; r < out_n; ++r) {
+            for (c = 0; c < out_n; ++c) {
+                int src = ((2 * r) * n) + (2 * c);
+                int32_t max_val = matrix_c_stage[src];
+
+                if (matrix_c_stage[src + 1] > max_val) {
+                    max_val = matrix_c_stage[src + 1];
+                }
+                if (matrix_c_stage[src + n] > max_val) {
+                    max_val = matrix_c_stage[src + n];
+                }
+                if (matrix_c_stage[src + n + 1] > max_val) {
+                    max_val = matrix_c_stage[src + n + 1];
+                }
+                matrix_c_ref[(r * out_n) + c] = max_val;
+            }
+        }
+    } else {
+        for (r = 0; r < n; ++r) {
+            for (c = 0; c < n; ++c) {
+                matrix_c_ref[(r * n) + c] = matrix_c_stage[(r * n) + c];
+            }
         }
     }
 }
@@ -759,6 +906,26 @@ static void load_matrix(serial_handle_t handle,
     }
 }
 
+static void load_bias_vector(serial_handle_t handle,
+                             const int8_t *bias,
+                             int n,
+                             int timeout_ms,
+                             bool verbose)
+{
+    int idx;
+    char msg[96];
+
+    for (idx = 0; idx < n; ++idx) {
+        if (verbose && ((idx % 32) == 0)) {
+            snprintf(msg, sizeof(msg), "Loading bias index %d/%d", idx, n - 1);
+            log_msg(true, msg);
+        }
+
+        send_frame(handle, CMD_WRITE_BIAS, (uint16_t)idx, (uint8_t)bias[idx]);
+        wait_ack(handle, timeout_ms, "bias");
+    }
+}
+
 static void query_status(serial_handle_t handle, int timeout_ms, bool *busy, bool *done, bool *overflow, uint32_t *cycles)
 {
     uint8_t resp[6];
@@ -845,12 +1012,12 @@ static uint32_t wait_done(serial_handle_t handle, int timeout_ms, bool verbose, 
     }
 }
 
-static void dump_matrix_c(serial_handle_t handle, int32_t *mat, int n, int timeout_ms, bool verbose)
+static void dump_matrix_c(serial_handle_t handle, int32_t *mat, int expected_n, int timeout_ms, bool verbose)
 {
     uint8_t header[3];
     uint8_t raw[4];
     uint16_t idx;
-    uint16_t elems = (uint16_t)(n * n);
+    uint16_t elems = (uint16_t)(expected_n * expected_n);
     uint16_t returned_n;
     uint16_t log_step = (elems >= 256u) ? 256u : 32u;
 
@@ -868,7 +1035,7 @@ static void dump_matrix_c(serial_handle_t handle, int32_t *mat, int n, int timeo
     }
 
     returned_n = (uint16_t)(((uint16_t)header[1] << 8) | (uint16_t)header[2]);
-    if ((int)returned_n != n) {
+    if ((int)returned_n != expected_n) {
         fail_msg("Dump size returned by FPGA does not match requested N.");
     }
 
@@ -925,8 +1092,12 @@ static void print_profile_summary(const struct profile_data *profile,
 
 static void write_run_info(const char *path,
                            int n,
+                           int output_n,
                            int iteration,
                            bool random_mode,
+                           bool enable_bias,
+                           int activation,
+                           bool enable_pool,
                            bool reuse_a,
                            bool reuse_b,
                            bool overflow_seen,
@@ -941,8 +1112,12 @@ static void write_run_info(const char *path,
     }
 
     fprintf(fp, "MATRIX_N=%d\n", n);
+    fprintf(fp, "OUTPUT_N=%d\n", output_n);
     fprintf(fp, "ITERATION=%d\n", iteration);
     fprintf(fp, "RANDOM_MODE=%d\n", random_mode ? 1 : 0);
+    fprintf(fp, "BIAS=%d\n", enable_bias ? 1 : 0);
+    fprintf(fp, "ACTIVATION=%d\n", activation);
+    fprintf(fp, "POOL=%d\n", enable_pool ? 1 : 0);
     fprintf(fp, "REUSE_A=%d\n", reuse_a ? 1 : 0);
     fprintf(fp, "REUSE_B=%d\n", reuse_b ? 1 : 0);
     fprintf(fp, "VERIFY=PASS\n");
@@ -981,8 +1156,10 @@ int main(int argc, char **argv)
     size_t elems;
     int8_t *matrix_a;
     int8_t *matrix_b;
+    int8_t *bias_vec;
     int32_t *matrix_c;
     int32_t *matrix_c_ref;
+    int32_t *matrix_c_stage;
     struct load_stats load_stats_a;
     struct load_stats load_stats_b;
     struct profile_data profile;
@@ -997,27 +1174,48 @@ int main(int argc, char **argv)
     char summary_path[512];
     FILE *summary_fp = NULL;
     unsigned int seed_value;
+    unsigned int bias_seed_value;
     int iteration;
+    int output_n;
+    uint16_t start_word;
 
     parse_args(argc, argv, &opt);
     ensure_dir(opt.out_dir);
 
     elems = (size_t)opt.n * (size_t)opt.n;
+    output_n = output_dim_for_mode(opt.n, opt.pool);
     matrix_a = (int8_t *)malloc(elems * sizeof(*matrix_a));
     matrix_b = (int8_t *)malloc(elems * sizeof(*matrix_b));
+    bias_vec = (int8_t *)malloc((size_t)opt.n * sizeof(*bias_vec));
     matrix_c = (int32_t *)malloc(elems * sizeof(*matrix_c));
     matrix_c_ref = (int32_t *)malloc(elems * sizeof(*matrix_c_ref));
+    matrix_c_stage = (int32_t *)malloc(elems * sizeof(*matrix_c_stage));
 
-    if (matrix_a == NULL || matrix_b == NULL || matrix_c == NULL || matrix_c_ref == NULL) {
+    if (matrix_a == NULL || matrix_b == NULL || bias_vec == NULL ||
+        matrix_c == NULL || matrix_c_ref == NULL || matrix_c_stage == NULL) {
         fail_msg("Failed to allocate host matrices.");
     }
 
     if (opt.use_random) {
         seed_value = opt.seed_given ? opt.seed : (unsigned int)time(NULL);
+        bias_seed_value = seed_value ^ 0x13579BDFu;
     } else {
         read_matrix_file(opt.matrix_a_path, matrix_a, opt.n);
         read_matrix_file(opt.matrix_b_path, matrix_b, opt.n);
         seed_value = 0u;
+        bias_seed_value = 0u;
+    }
+
+    if (opt.bias) {
+        if (opt.use_random && opt.bias_vec_path == NULL) {
+            random_vector(bias_vec, opt.n, &bias_seed_value);
+        } else if (opt.bias_vec_path != NULL) {
+            read_vector_file(opt.bias_vec_path, bias_vec, opt.n);
+        } else {
+            fail_msg("Bias mode requires --random or --bias-vec <file>.");
+        }
+    } else {
+        memset(bias_vec, 0, (size_t)opt.n * sizeof(*bias_vec));
     }
 
     serial_handle = serial_open(opt.port, opt.baud);
@@ -1043,9 +1241,20 @@ int main(int argc, char **argv)
             if (load_b_this_iter) {
                 random_matrix(matrix_b, opt.n, &seed_value);
             }
+            if (opt.bias && (opt.bias_vec_path == NULL)) {
+                random_vector(bias_vec, opt.n, &bias_seed_value);
+            }
         }
 
-        compute_reference(matrix_a, matrix_b, matrix_c_ref, opt.n);
+        compute_reference(matrix_a,
+                          matrix_b,
+                          bias_vec,
+                          matrix_c_ref,
+                          matrix_c_stage,
+                          opt.n,
+                          opt.bias,
+                          opt.activation,
+                          opt.pool);
 
         if (opt.iterations == 1) {
             snprintf(run_dir, sizeof(run_dir), "%s", opt.out_dir);
@@ -1058,6 +1267,10 @@ int main(int argc, char **argv)
         write_matrix_i8(path_buf, matrix_a, opt.n);
         join_path(path_buf, sizeof(path_buf), run_dir, "matrix_b.txt");
         write_matrix_i8(path_buf, matrix_b, opt.n);
+        if (opt.bias) {
+            join_path(path_buf, sizeof(path_buf), run_dir, "bias.txt");
+            write_vector_i8(path_buf, bias_vec, opt.n);
+        }
 
         memset(&load_stats_a, 0, sizeof(load_stats_a));
         memset(&load_stats_b, 0, sizeof(load_stats_b));
@@ -1092,12 +1305,25 @@ int main(int argc, char **argv)
                         &load_stats_b);
         }
 
+        if (opt.bias) {
+            log_msg(opt.verbose, "Loading bias vector.");
+            load_bias_vector(serial_handle, bias_vec, opt.n, opt.timeout_ms, opt.verbose);
+        }
+
         log_msg(opt.verbose, "Sending START.");
-        send_frame(serial_handle, CMD_START, (uint16_t)opt.n, 0);
+        start_word = (uint16_t)opt.n;
+        if (opt.pool) {
+            start_word |= (uint16_t)(1u << 11);
+        }
+        if (opt.bias) {
+            start_word |= (uint16_t)(1u << 12);
+        }
+        start_word |= (uint16_t)((uint16_t)opt.activation << 13);
+        send_frame(serial_handle, CMD_START, start_word, 0);
         wait_ack(serial_handle, opt.timeout_ms, "start");
         cycles = wait_done(serial_handle, opt.timeout_ms, opt.verbose, &overflow_seen);
         log_msg(opt.verbose, "Requesting dump.");
-        dump_matrix_c(serial_handle, matrix_c, opt.n, opt.timeout_ms, opt.verbose);
+        dump_matrix_c(serial_handle, matrix_c, output_n, opt.timeout_ms, opt.verbose);
         query_profile(serial_handle, opt.timeout_ms, &profile);
         host_elapsed_ms = monotonic_ms() - host_start_ms;
 
@@ -1111,15 +1337,19 @@ int main(int argc, char **argv)
             fail_msg("Profile flags are inconsistent with a completed run.");
         }
 
-        verify_result_or_die(matrix_c, matrix_c_ref, opt.n, iteration);
+        verify_result_or_die(matrix_c, matrix_c_ref, output_n, iteration);
 
         join_path(path_buf, sizeof(path_buf), run_dir, "matrix_c_fpga.txt");
-        write_matrix_i32(path_buf, matrix_c, opt.n);
+        write_matrix_i32(path_buf, matrix_c, output_n);
         join_path(path_buf, sizeof(path_buf), run_dir, "run_info.txt");
         write_run_info(path_buf,
                        opt.n,
+                       output_n,
                        iteration,
                        opt.use_random,
+                       opt.bias,
+                       opt.activation,
+                       opt.pool,
                        opt.reuse_a,
                        opt.reuse_b,
                        overflow_seen,
@@ -1155,13 +1385,21 @@ int main(int argc, char **argv)
             write_matrix_i8(path_buf, matrix_a, opt.n);
             join_path(path_buf, sizeof(path_buf), opt.out_dir, "matrix_b.txt");
             write_matrix_i8(path_buf, matrix_b, opt.n);
+            if (opt.bias) {
+                join_path(path_buf, sizeof(path_buf), opt.out_dir, "bias.txt");
+                write_vector_i8(path_buf, bias_vec, opt.n);
+            }
             join_path(path_buf, sizeof(path_buf), opt.out_dir, "matrix_c_fpga.txt");
-            write_matrix_i32(path_buf, matrix_c, opt.n);
+            write_matrix_i32(path_buf, matrix_c, output_n);
             join_path(path_buf, sizeof(path_buf), opt.out_dir, "run_info.txt");
             write_run_info(path_buf,
                            opt.n,
+                           output_n,
                            iteration,
                            opt.use_random,
+                           opt.bias,
+                           opt.activation,
+                           opt.pool,
                            opt.reuse_a,
                            opt.reuse_b,
                            overflow_seen,
@@ -1179,6 +1417,9 @@ int main(int argc, char **argv)
 
     printf("Wrote %s/matrix_a.txt\n", opt.out_dir);
     printf("Wrote %s/matrix_b.txt\n", opt.out_dir);
+    if (opt.bias) {
+        printf("Wrote %s/bias.txt\n", opt.out_dir);
+    }
     printf("Wrote %s/matrix_c_fpga.txt\n", opt.out_dir);
     printf("Verified %d iteration(s) successfully.\n", opt.iterations);
     printf("Aggregate cycles: %llu\n", (unsigned long long)total_cycles);
@@ -1186,7 +1427,9 @@ int main(int argc, char **argv)
 
     free(matrix_a);
     free(matrix_b);
+    free(bias_vec);
     free(matrix_c);
     free(matrix_c_ref);
+    free(matrix_c_stage);
     return 0;
 }

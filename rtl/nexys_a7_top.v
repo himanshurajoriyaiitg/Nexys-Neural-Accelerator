@@ -14,7 +14,10 @@ module nexys_a7_top #(
     input  wire        CPU_RESETN,
     input  wire        UART_TXD_IN,
     output wire        UART_RXD_OUT,
-    output wire [15:0] LED
+    output wire [15:0] LED,
+    output wire [6:0]  SEG,
+    output wire        DP,
+    output wire [7:0]  AN
 );
 
     function integer clog2_safe;
@@ -38,12 +41,15 @@ module nexys_a7_top #(
     localparam integer MATRIX_ELEMS = N * N;
     localparam integer ADDRW        = clog2_safe(MATRIX_ELEMS);
     localparam integer RUN_W        = clog2_safe((3 * ARRAY_N) - 1);
+    localparam integer SYS_CLK_DIVIDE            = 4;
+    localparam integer SYS_CLK_HZ                =
+        (CLK_HZ / SYS_CLK_DIVIDE) > 0 ? (CLK_HZ / SYS_CLK_DIVIDE) : 1;
     localparam integer HEARTBEAT_W               = 27;
-    localparam integer ACTIVITY_LED_HOLD_CYCLES = CLK_HZ;
-    localparam integer STAGE_LED_HOLD_CYCLES    = CLK_HZ * 2;
+    localparam integer ACTIVITY_LED_HOLD_CYCLES = SYS_CLK_HZ;
+    localparam integer STAGE_LED_HOLD_CYCLES    = SYS_CLK_HZ * 2;
     localparam integer STREAM_PACKET_MAX_BYTES  = 52;
     localparam integer LED_PROGRESS_STEP_CYCLES =
-        (CLK_HZ / 4) > 0 ? (CLK_HZ / 4) : 1;
+        (SYS_CLK_HZ / 4) > 0 ? (SYS_CLK_HZ / 4) : 1;
     localparam integer LED_HOLD_CYCLES_MAX      =
         (STAGE_LED_HOLD_CYCLES > ACTIVITY_LED_HOLD_CYCLES) ?
         STAGE_LED_HOLD_CYCLES : ACTIVITY_LED_HOLD_CYCLES;
@@ -67,10 +73,15 @@ module nexys_a7_top #(
     localparam [7:0] CMD_STATUS  = 8'h04;
     localparam [7:0] CMD_DUMP_C  = 8'h05;
     localparam [7:0] CMD_PROFILE = 8'h06;
+    localparam [7:0] CMD_WRITE_BIAS = 8'h07;
+    localparam [7:0] CMD_SET_LED_CODE = 8'h20;
     localparam [7:0] CMD_WRITE_A_BURST = 8'h10;
     localparam [7:0] CMD_WRITE_B_BURST = 8'h11;
     localparam [7:0] CMD_ZERO_A_RUN    = 8'h12;
     localparam [7:0] CMD_ZERO_B_RUN    = 8'h13;
+    localparam [7:0] CMD_WRITE_SNN_IMG = 8'h21;
+    localparam [7:0] CMD_START_SNN     = 8'h22;
+    localparam [7:0] CMD_STATUS_SNN    = 8'h23;
 
     localparam [7:0] RESP_ACK    = 8'h5A;
     localparam [7:0] RESP_ERROR  = 8'hE0;
@@ -99,10 +110,55 @@ module nexys_a7_top #(
 
     wire clk;
     wire rst_n;
-    assign clk   = CLK100MHZ;
+    wire clk_ready;
+`ifdef SYNTHESIS
+    wire clk_mmcm;
+    wire clk_fb_mmcm;
+    wire clk_fb;
+    wire mmcm_locked;
+
+    MMCME2_BASE #(
+        .BANDWIDTH        ("OPTIMIZED"),
+        .CLKIN1_PERIOD    (10.0),
+        .CLKFBOUT_MULT_F  (10.0),
+        .DIVCLK_DIVIDE    (1),
+        .CLKOUT0_DIVIDE_F (40.0),
+        .CLKOUT0_DUTY_CYCLE(0.5),
+        .CLKOUT0_PHASE    (0.0),
+        .STARTUP_WAIT     ("FALSE")
+    ) u_sys_clk_mmcm (
+        .CLKIN1   (CLK100MHZ),
+        .CLKFBIN  (clk_fb),
+        .RST      (1'b0),
+        .PWRDWN   (1'b0),
+        .CLKFBOUT (clk_fb_mmcm),
+        .CLKOUT0  (clk_mmcm),
+        .LOCKED   (mmcm_locked)
+    );
+
+    BUFG u_clkfb_buf (
+        .I (clk_fb_mmcm),
+        .O (clk_fb)
+    );
+
+    BUFG u_sys_clk_buf (
+        .I (clk_mmcm),
+        .O (clk)
+    );
+
+    assign clk_ready = mmcm_locked;
+`else
+    reg [1:0] sim_clk_div = 2'b00;
+    always @(posedge CLK100MHZ) begin
+        sim_clk_div <= sim_clk_div + 2'b01;
+    end
+    assign clk = sim_clk_div[1];
+    assign clk_ready = 1'b1;
+`endif
+
     reset_sync u_reset_sync (
         .clk    (clk),
-        .arst_n (CPU_RESETN),
+        .arst_n (CPU_RESETN & clk_ready),
         .rst_n  (rst_n)
     );
 
@@ -115,6 +171,9 @@ module nexys_a7_top #(
     reg        tx_req_valid;
 
     reg                      core_start;
+    reg  [1:0]               core_act_mode;
+    reg                      core_enable_bias;
+    reg                      core_enable_pool;
     reg  [DIM_W-1:0]         requested_matrix_dim;
     wire                     core_busy;
     wire                     core_done;
@@ -148,10 +207,13 @@ module nexys_a7_top #(
 
     reg                      a_wr_en;
     reg                      b_wr_en;
+    reg                      bias_wr_en;
     reg  [ADDRW-1:0]         a_wr_addr;
     reg  [ADDRW-1:0]         b_wr_addr;
+    reg  [DIM_W-1:0]         bias_wr_addr;
     reg  signed [DW-1:0]     a_wr_data;
     reg  signed [DW-1:0]     b_wr_data;
+    reg  signed [DW-1:0]     bias_wr_data;
     reg  [ADDRW-1:0]         c_host_rd_addr;
     wire signed [ACCW-1:0]   c_host_rd_data;
 
@@ -199,11 +261,17 @@ module nexys_a7_top #(
     reg                      led_buf_sel;
     reg                      led_load_buf_sel;
     reg  [15:0]              led_out;
+    reg  [7:0]               result_led_code;
+    reg                      result_led_valid;
 
     wire [15:0] pending_word;
+    wire [DIM_W-1:0] output_matrix_dim;
+    wire [ADDRW:0] output_matrix_elems;
     wire [ADDRW:0] dump_last_index;
     wire [15:0] active_dim_u16;
+    wire [15:0] output_dim_u16;
     wire        led_heartbeat;
+    wire [3:0]  led_mode;
     wire [7:0]  status_flags;
     wire        led_busy_seen;
     wire        led_rx_seen;
@@ -220,9 +288,13 @@ module nexys_a7_top #(
 
     assign pending_word = {pending_addr_hi_byte, pending_addr_lo_byte};
     assign active_matrix_elems = active_matrix_dim * active_matrix_dim;
-    assign dump_last_index = active_matrix_elems - 1'b1;
+    assign output_matrix_dim = core_enable_pool ? (active_matrix_dim >> 1) : active_matrix_dim;
+    assign output_matrix_elems = output_matrix_dim * output_matrix_dim;
+    assign dump_last_index = output_matrix_elems - 1'b1;
     assign active_dim_u16 = active_matrix_dim;
+    assign output_dim_u16 = output_matrix_dim;
     assign led_heartbeat = heartbeat_ctr[HEARTBEAT_W-1];
+    assign led_mode = {core_enable_pool, core_enable_bias, core_act_mode};
     assign status_flags = {5'b0, core_overflow_flag, done_latched, core_busy};
     assign led_busy_seen = (busy_led_hold != 0);
     assign led_rx_seen = (rx_led_hold != 0);
@@ -238,7 +310,7 @@ module nexys_a7_top #(
     assign profile_swap_seen = (core_profile_buffer_swap_count != 0);
 
      uart_rx #(
-        .CLK_HZ (CLK_HZ),
+        .CLK_HZ (SYS_CLK_HZ),
         .BAUD   (UART_BAUD)
     ) u_uart_rx (
         .clk     (clk),
@@ -249,7 +321,7 @@ module nexys_a7_top #(
     );
 
     uart_tx #(
-        .CLK_HZ (CLK_HZ),
+        .CLK_HZ (SYS_CLK_HZ),
         .BAUD   (UART_BAUD)
     ) u_uart_tx (
         .clk     (clk),
@@ -272,6 +344,9 @@ module nexys_a7_top #(
         .clk              (clk),
         .rst_n            (rst_n),
         .start            (core_start),
+        .act_mode         (core_act_mode),
+        .enable_bias      (core_enable_bias),
+        .enable_pool      (core_enable_pool),
         .matrix_dim       (requested_matrix_dim),
         .busy             (core_busy),
         .done             (core_done),
@@ -303,15 +378,34 @@ module nexys_a7_top #(
         .profile_result_signature(core_profile_result_signature),
         .a_wr_en          (a_wr_en),
         .b_wr_en          (b_wr_en),
+        .bias_wr_en       (bias_wr_en),
         .a_wr_addr        (a_wr_addr),
         .b_wr_addr        (b_wr_addr),
+        .bias_wr_addr     (bias_wr_addr),
         .a_wr_data        (a_wr_data),
         .b_wr_data        (b_wr_data),
+        .bias_wr_data     (bias_wr_data),
         .c_host_rd_addr   (c_host_rd_addr),
         .c_host_rd_data   (c_host_rd_data)
     );
 
     assign LED = led_out;
+
+    reg [7:0] snn_img_data [0:255];
+    reg snn_start_trigger;
+    reg snn_done_latched;
+    reg [3:0] snn_prediction_latched;
+    wire snn_done;
+    wire [3:0] snn_prediction;
+    
+    snn_core u_snn_core (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(snn_start_trigger),
+        .img_data(snn_img_data),
+        .done(snn_done),
+        .prediction(snn_prediction)
+    );
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -326,13 +420,19 @@ module nexys_a7_top #(
             pending_addr_lo_byte  <= 8'd0;
             pending_data_byte     <= 8'd0;
             core_start            <= 1'b0;
+            core_act_mode         <= 2'b00;
+            core_enable_bias      <= 1'b0;
+            core_enable_pool      <= 1'b0;
             requested_matrix_dim  <= '0;
             a_wr_en               <= 1'b0;
             b_wr_en               <= 1'b0;
+            bias_wr_en            <= 1'b0;
             a_wr_addr             <= '0;
             b_wr_addr             <= '0;
+            bias_wr_addr          <= '0;
             a_wr_data             <= '0;
             b_wr_data             <= '0;
+            bias_wr_data          <= '0;
             c_host_rd_addr        <= '0;
             tx_data               <= 8'd0;
             tx_start              <= 1'b0;
@@ -369,10 +469,18 @@ module nexys_a7_top #(
             led_progress_div      <= '0;
             led_buf_sel           <= 1'b0;
             led_load_buf_sel      <= 1'b0;
+            result_led_code       <= 8'd0;
+            result_led_valid      <= 1'b0;
+            snn_start_trigger     <= 1'b0;
+            snn_done_latched      <= 1'b0;
+            snn_prediction_latched <= 4'd0;
+            for (int i = 0; i < 256; i++) snn_img_data[i] <= 8'd0;
         end else begin
             core_start <= 1'b0;
+            snn_start_trigger <= 1'b0;
             a_wr_en    <= 1'b0;
             b_wr_en    <= 1'b0;
+            bias_wr_en <= 1'b0;
             tx_start   <= 1'b0;
             heartbeat_ctr <= heartbeat_ctr + 1'b1;
             if (led_progress_div == (LED_PROGRESS_STEP_CYCLES - 1)) begin
@@ -458,6 +566,14 @@ module nexys_a7_top #(
             if (core_done) begin
                 done_latched <= 1'b1;
                 led_progress <= active_matrix_dim[3:0];
+            end
+
+            if (snn_done) begin
+                snn_done_latched       <= 1'b1;
+                snn_prediction_latched <= snn_prediction;
+                done_latched           <= 1'b1;
+                result_led_code        <= {4'd0, snn_prediction};
+                result_led_valid       <= 1'b1;
             end
 
             if (core_clear_acc) begin
@@ -594,9 +710,12 @@ module nexys_a7_top #(
                     end
 
                     CMD_START: begin
-                        if (!core_busy && (pending_word >= 1) && (pending_word <= N)) begin
+                        if (!core_busy && (pending_word[DIM_W-1:0] >= 1) && (pending_word[DIM_W-1:0] <= N)) begin
                             core_start           <= 1'b1;
                             requested_matrix_dim <= pending_word[DIM_W-1:0];
+                            core_enable_pool     <= pending_word[11];
+                            core_enable_bias     <= pending_word[12];
+                            core_act_mode        <= pending_word[14:13];
                             done_latched         <= 1'b0;
                             run_burst_seen       <= pending_burst_seen;
                             run_zero_seen        <= pending_zero_seen;
@@ -622,8 +741,29 @@ module nexys_a7_top #(
                         stream_state      <= STREAM_PACKET;
                     end
 
+                    CMD_WRITE_BIAS: begin
+                        if (!core_busy && (pending_word[DIM_W-1:0] < N)) begin
+                            bias_wr_en   <= 1'b1;
+                            bias_wr_addr <= pending_word[DIM_W-1:0];
+                            bias_wr_data <= $signed(pending_data_byte);
+                            done_latched <= 1'b0;
+                            tx_req_data  <= RESP_ACK;
+                            tx_req_valid <= 1'b1;
+                        end else begin
+                            tx_req_data  <= RESP_ERROR;
+                            tx_req_valid <= 1'b1;
+                        end
+                    end
+
+                    CMD_SET_LED_CODE: begin
+                        result_led_code <= pending_data_byte;
+                        result_led_valid <= 1'b1;
+                        tx_req_data <= RESP_ACK;
+                        tx_req_valid <= 1'b1;
+                    end
+
                     CMD_DUMP_C: begin
-                        if (!core_busy && (active_matrix_dim != 0)) begin
+                        if (!core_busy && (output_matrix_dim != 0)) begin
                             tx_req_data  <= RESP_DUMP;
                             tx_req_valid <= 1'b1;
                             dump_index   <= '0;
@@ -758,6 +898,40 @@ module nexys_a7_top #(
                         end
                     end
 
+                    CMD_WRITE_SNN_IMG: begin
+                        if (pending_word[15:8] == 8'd0) begin
+                            snn_img_data[pending_word[7:0]] <= pending_data_byte;
+                            tx_req_data  <= RESP_ACK;
+                            tx_req_valid <= 1'b1;
+                        end else begin
+                            tx_req_data  <= RESP_ERROR;
+                            tx_req_valid <= 1'b1;
+                        end
+                    end
+                    
+                    CMD_START_SNN: begin
+                        snn_start_trigger <= 1'b1;
+                        snn_done_latched <= 1'b0;
+                        snn_prediction_latched <= 4'd0;
+                        result_led_valid <= 1'b0;
+                        tx_req_data  <= RESP_ACK;
+                        tx_req_valid <= 1'b1;
+                        done_latched <= 1'b0;
+                    end
+                    
+                    CMD_STATUS_SNN: begin
+                        if (snn_done_latched) begin
+                            stream_packet[0] <= RESP_STATUS;
+                            stream_packet[1] <= {4'b0000, snn_prediction_latched};
+                            stream_packet_len <= 2;
+                            stream_packet_index <= '0;
+                            stream_state <= STREAM_PACKET;
+                        end else begin
+                            tx_req_data <= RESP_ERROR;
+                            tx_req_valid <= 1'b1;
+                        end
+                    end
+
                     default: begin
                         tx_req_data  <= RESP_ERROR;
                         tx_req_valid <= 1'b1;
@@ -780,13 +954,13 @@ module nexys_a7_top #(
                     end
 
                     STREAM_DUMP_DIM_HI: begin
-                        tx_req_data  <= active_dim_u16[15:8];
+                        tx_req_data  <= output_dim_u16[15:8];
                         tx_req_valid <= 1'b1;
                         stream_state <= STREAM_DUMP_DIM_LO;
                     end
 
                     STREAM_DUMP_DIM_LO: begin
-                        tx_req_data  <= active_dim_u16[7:0];
+                        tx_req_data  <= output_dim_u16[7:0];
                         tx_req_valid <= 1'b1;
                         stream_state <= STREAM_DUMP_SETADDR;
                     end
@@ -846,7 +1020,7 @@ module nexys_a7_top #(
         led_out = 16'd0;
 
         if (core_busy) begin
-            led_out[3:0]  = led_progress;
+            led_out[3:0]  = led_mode;
             led_out[4]    = led_clear_c_seen;
             led_out[5]    = led_load_seen;
             led_out[6]    = led_clear_acc_seen;
@@ -861,21 +1035,33 @@ module nexys_a7_top #(
             led_out[14]   = core_overflow_flag;
             led_out[15]   = led_heartbeat;
         end else if (done_latched) begin
-            led_out[3:0]  = core_profile_result_signature[3:0];
-            led_out[4]    = 1'b1;
-            led_out[5]    = core_overflow_flag;
-            led_out[6]    = profile_wait_seen;
-            led_out[7]    = profile_overlap_seen;
-            led_out[8]    = profile_swap_seen;
-            led_out[9]    = run_burst_seen;
-            led_out[10]   = run_zero_seen;
-            led_out[11]   = led_writeback_seen;
-            led_out[12]   = led_run_seen;
-            led_out[13]   = led_load_seen;
-            led_out[14]   = led_clear_c_seen;
-            led_out[15]   = led_heartbeat;
+            if (result_led_valid) begin
+                led_out[7:0]  = result_led_code;
+                led_out[8]    = 1'b1;
+                led_out[9]    = core_overflow_flag;
+                led_out[10]   = profile_wait_seen;
+                led_out[11]   = profile_overlap_seen;
+                led_out[12]   = profile_swap_seen;
+                led_out[13]   = led_writeback_seen;
+                led_out[14]   = 1'b1;
+                led_out[15]   = led_heartbeat;
+            end else begin
+                led_out[3:0]  = led_mode;
+                led_out[4]    = 1'b1;
+                led_out[5]    = core_overflow_flag;
+                led_out[6]    = profile_wait_seen;
+                led_out[7]    = profile_overlap_seen;
+                led_out[8]    = profile_swap_seen;
+                led_out[9]    = run_burst_seen;
+                led_out[10]   = run_zero_seen;
+                led_out[11]   = led_writeback_seen;
+                led_out[12]   = led_run_seen;
+                led_out[13]   = led_load_seen;
+                led_out[14]   = led_clear_c_seen;
+                led_out[15]   = led_heartbeat;
+            end
         end else if (command_engine_busy || pending_cmd_valid || (rx_state == RX_BURST_DATA)) begin
-            led_out[3:0]  = led_progress;
+            led_out[3:0]  = led_mode;
             led_out[4]    = burst_active;
             led_out[5]    = zero_run_active;
             led_out[6]    = pending_burst_seen;
@@ -885,20 +1071,44 @@ module nexys_a7_top #(
             led_out[13]   = led_busy_seen;
             led_out[15]   = led_heartbeat;
         end else begin
-            led_out[3:0]  = active_matrix_dim[3:0];
-            led_out[4]    = done_latched;
-            led_out[5]    = core_overflow_flag;
-            led_out[6]    = profile_wait_seen;
-            led_out[7]    = profile_overlap_seen;
-            led_out[8]    = profile_swap_seen;
-            led_out[9]    = run_burst_seen;
-            led_out[10]   = run_zero_seen;
-            led_out[11]   = led_tx_seen;
-            led_out[12]   = led_rx_seen;
-            led_out[13]   = led_busy_seen;
-            led_out[14]   = led_writeback_seen | led_run_seen | led_load_seen;
-            led_out[15]   = led_heartbeat;
+            if (result_led_valid) begin
+                led_out[7:0]  = result_led_code;
+                led_out[8]    = 1'b1;
+                led_out[9]    = done_latched;
+                led_out[10]   = core_overflow_flag;
+                led_out[11]   = led_tx_seen;
+                led_out[12]   = led_rx_seen;
+                led_out[13]   = led_busy_seen;
+                led_out[14]   = led_writeback_seen | led_run_seen | led_load_seen;
+                led_out[15]   = led_heartbeat;
+            end else begin
+                led_out[3:0]  = led_mode;
+                led_out[4]    = done_latched;
+                led_out[5]    = core_overflow_flag;
+                led_out[6]    = profile_wait_seen;
+                led_out[7]    = profile_overlap_seen;
+                led_out[8]    = profile_swap_seen;
+                led_out[9]    = run_burst_seen;
+                led_out[10]   = run_zero_seen;
+                led_out[11]   = led_tx_seen;
+                led_out[12]   = led_rx_seen;
+                led_out[13]   = led_busy_seen;
+                led_out[14]   = led_writeback_seen | led_run_seen | led_load_seen;
+                led_out[15]   = led_heartbeat;
+            end
         end
     end
+
+    sevenseg_display #(
+        .CLK_HZ (SYS_CLK_HZ)
+    ) u_sevenseg_display (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .value_valid(result_led_valid),
+        .value      (result_led_code),
+        .seg        (SEG),
+        .dp         (DP),
+        .an         (AN)
+    );
 
 endmodule

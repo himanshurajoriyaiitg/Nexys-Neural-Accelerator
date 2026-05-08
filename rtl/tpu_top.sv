@@ -13,6 +13,9 @@ module tpu_top #(
     input  wire                     clk,
     input  wire                     rst_n,
     input  wire                     start,
+    input  wire [1:0]               act_mode,
+    input  wire                     enable_bias,
+    input  wire                     enable_pool,
     input  wire [DIM_W-1:0]         matrix_dim,
     output wire                     busy,
     output wire                     done,
@@ -45,10 +48,13 @@ module tpu_top #(
 
     input  wire                     a_wr_en,
     input  wire                     b_wr_en,
+    input  wire                     bias_wr_en,
     input  wire [ADDRW-1:0]         a_wr_addr,
     input  wire [ADDRW-1:0]         b_wr_addr,
+    input  wire [DIM_W-1:0]         bias_wr_addr,
     input  wire signed [DW-1:0]     a_wr_data,
     input  wire signed [DW-1:0]     b_wr_data,
+    input  wire signed [DW-1:0]     bias_wr_data,
 
     input  wire [ADDRW-1:0]         c_host_rd_addr,
     output reg  signed [ACCW-1:0]   c_host_rd_data
@@ -65,9 +71,39 @@ module tpu_top #(
         end
     endfunction
 
+    function automatic signed [ACCW-1:0] apply_activation_fn;
+        input signed [ACCW-1:0] value;
+        input [1:0] mode;
+        begin
+            case (mode)
+                2'b01: begin
+                    if (value > $signed(0)) begin
+                        apply_activation_fn = value;
+                    end else begin
+                        apply_activation_fn = $signed({(ACCW){1'b0}});
+                    end
+                end
+
+                2'b10: begin
+                    if (value > $signed(0)) begin
+                        apply_activation_fn = value;
+                    end else begin
+                        apply_activation_fn = value >>> 2;
+                    end
+                end
+
+                default: begin
+                    apply_activation_fn = value;
+                end
+            endcase
+        end
+    endfunction
+
     localparam integer TILE_COUNT_MAX = (N + ARRAY_N - 1) / ARRAY_N;
     localparam integer MATRIX_ELEMS   = N * N;
     localparam integer TILE_ELEMS     = ARRAY_N * ARRAY_N;
+    localparam integer HALF_ARRAY_N   = ((ARRAY_N / 2) > 0) ? (ARRAY_N / 2) : 1;
+    localparam integer POOL_TILE_ELEMS = (TILE_ELEMS / 4) > 0 ? (TILE_ELEMS / 4) : 1;
     localparam integer MATRIX_ADDRW   = clog2_safe(MATRIX_ELEMS);
     localparam integer TILE_IDX_W     = clog2_safe(TILE_COUNT_MAX);
     localparam integer LOCAL_IDX_W    = clog2_safe(ARRAY_N);
@@ -126,11 +162,33 @@ module tpu_top #(
 
     reg  signed [DW-1:0]    a_tile [0:1][0:ARRAY_N-1][0:ARRAY_N-1];
     reg  signed [DW-1:0]    b_tile [0:1][0:ARRAY_N-1][0:ARRAY_N-1];
+    reg  signed [DW-1:0]    bias_mem [0:N-1];
     reg  signed [DW-1:0]    a_feed [0:ARRAY_N-1];
     reg  signed [DW-1:0]    b_feed [0:ARRAY_N-1];
     wire signed [ACCW-1:0]  partial_tile [0:ARRAY_N-1][0:ARRAY_N-1];
     wire                    array_overflow_any;
     wire signed [31:0]      c_wr_data_ext;
+
+    integer pool_row_now;
+    integer pool_col_now;
+    wire [LOCAL_IDX_W-1:0] base_r;
+    wire [LOCAL_IDX_W-1:0] base_c;
+    wire [LOCAL_IDX_W-1:0] base_r_next;
+    wire [LOCAL_IDX_W-1:0] base_c_next;
+    wire [DIM_W-1:0] global_c_base;
+    wire [DIM_W-1:0] global_c_base_next;
+    wire signed [ACCW-1:0] pool_elems [0:3];
+    wire signed [DW-1:0]   pool_bias  [0:3];
+    wire signed [ACCW-1:0] pool_pre   [0:3];
+    wire signed [ACCW-1:0] pool_post  [0:3];
+    wire signed [ACCW-1:0] max_01;
+    wire signed [ACCW-1:0] max_23;
+    wire signed [ACCW-1:0] max_all;
+    wire signed [ACCW-1:0] final_wr_data;
+    wire                   mode_passthrough;
+    integer out_dim;
+    integer out_global_row;
+    integer out_global_col;
 
     reg                     buf_sel_prev;
 
@@ -198,6 +256,7 @@ module tpu_top #(
     assign debug_wb_count = wb_count;
     assign debug_clear_c_addr = clear_c_addr;
     assign c_wr_data_ext = {{(32-ACCW){c_wr_data[ACCW-1]}}, c_wr_data};
+    assign mode_passthrough = !enable_bias && !enable_pool && (act_mode == 2'b00);
 
     a_bram #(
         .N     (N),
@@ -255,6 +314,12 @@ module tpu_top #(
         .c_out     (partial_tile),
         .overflow_any(array_overflow_any)
     );
+
+    always @(posedge clk) begin
+        if (bias_wr_en) begin
+            bias_mem[bias_wr_addr] <= bias_wr_data;
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -408,8 +473,8 @@ module tpu_top #(
             end
         end else begin
             if (load_active && (load_count > 0) && load_meta_valid) begin
-                a_tile[load_buf_sel_d][load_row_d][load_col_d] <= load_a_valid_d ? a_rd_data : '0;
-                b_tile[load_buf_sel_d][load_row_d][load_col_d] <= load_b_valid_d ? b_rd_data : '0;
+                a_tile[load_buf_sel_d][load_row_d][load_col_d] <= load_a_valid_d ? a_rd_data : $signed({(DW){1'b0}});
+                b_tile[load_buf_sel_d][load_row_d][load_col_d] <= load_b_valid_d ? b_rd_data : $signed({(DW){1'b0}});
             end
 
             if (load_active && (load_count < TILE_ELEMS)) begin
@@ -433,6 +498,11 @@ module tpu_top #(
         wb_col_now    = 0;
         wb_global_row = 0;
         wb_global_col = 0;
+        pool_row_now  = 0;
+        pool_col_now  = 0;
+        out_dim       = enable_pool ? (active_dim / 2) : active_dim;
+        out_global_row = 0;
+        out_global_col = 0;
 
         c_rd_addr = c_host_rd_addr;
 
@@ -441,8 +511,50 @@ module tpu_top #(
             wb_col_now    = wb_count % ARRAY_N;
             wb_global_row = (tile_row * ARRAY_N) + wb_row_now;
             wb_global_col = (tile_col * ARRAY_N) + wb_col_now;
+
+            pool_row_now  = wb_count / HALF_ARRAY_N;
+            pool_col_now  = wb_count % HALF_ARRAY_N;
+
+            if (enable_pool) begin
+                out_global_row = (tile_row * HALF_ARRAY_N) + pool_row_now;
+                out_global_col = (tile_col * HALF_ARRAY_N) + pool_col_now;
+            end else begin
+                out_global_row = wb_global_row;
+                out_global_col = wb_global_col;
+            end
         end
     end
+
+    assign base_r = enable_pool ? (pool_row_now[LOCAL_IDX_W-1:0] << 1) : wb_row_now[LOCAL_IDX_W-1:0];
+    assign base_c = enable_pool ? (pool_col_now[LOCAL_IDX_W-1:0] << 1) : wb_col_now[LOCAL_IDX_W-1:0];
+    assign base_r_next = base_r + 1'b1;
+    assign base_c_next = base_c + 1'b1;
+    assign global_c_base = (tile_col * ARRAY_N) + base_c;
+    assign global_c_base_next = global_c_base + 1'b1;
+
+    assign pool_elems[0] = partial_tile[base_r][base_c];
+    assign pool_elems[1] = partial_tile[base_r][base_c_next];
+    assign pool_elems[2] = partial_tile[base_r_next][base_c];
+    assign pool_elems[3] = partial_tile[base_r_next][base_c_next];
+
+    assign pool_bias[0] = enable_bias ? bias_mem[global_c_base]   : $signed({(DW){1'b0}});
+    assign pool_bias[1] = enable_bias ? bias_mem[global_c_base_next] : $signed({(DW){1'b0}});
+    assign pool_bias[2] = enable_bias ? bias_mem[global_c_base]   : $signed({(DW){1'b0}});
+    assign pool_bias[3] = enable_bias ? bias_mem[global_c_base_next] : $signed({(DW){1'b0}});
+
+    genvar p_idx;
+    generate
+        for (p_idx = 0; p_idx < 4; p_idx = p_idx + 1) begin : gen_pool_act
+            assign pool_pre[p_idx] = pool_elems[p_idx] + pool_bias[p_idx];
+            assign pool_post[p_idx] = apply_activation_fn(pool_pre[p_idx], act_mode);
+        end
+    endgenerate
+
+    assign max_01 = (pool_post[0] > pool_post[1]) ? pool_post[0] : pool_post[1];
+    assign max_23 = (pool_post[2] > pool_post[3]) ? pool_post[2] : pool_post[3];
+    assign max_all = (max_01 > max_23) ? max_01 : max_23;
+
+    assign final_wr_data = enable_pool ? max_all : pool_post[0];
 
     always @(*) begin
         c_wr_en        = 1'b0;
@@ -455,12 +567,16 @@ module tpu_top #(
             c_wr_addr = clear_c_addr;
             c_wr_data = '0;
         end else if (writeback_active &&
-                     (wb_count < TILE_ELEMS) &&
-                     (wb_global_row < active_dim) &&
-                     (wb_global_col < active_dim)) begin
+                     ((!enable_pool && wb_count < TILE_ELEMS) || (enable_pool && wb_count < POOL_TILE_ELEMS)) &&
+                     (out_global_row < out_dim) &&
+                     (out_global_col < out_dim)) begin
             c_wr_en   = 1'b1;
-            c_wr_addr = (wb_global_row * active_dim) + wb_global_col;
-            c_wr_data = partial_tile[wb_row_now][wb_col_now];
+            c_wr_addr = (out_global_row * out_dim) + out_global_col;
+            if (mode_passthrough) begin
+                c_wr_data = partial_tile[wb_row_now][wb_col_now];
+            end else begin
+                c_wr_data = final_wr_data;
+            end
         end
     end
 

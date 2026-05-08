@@ -29,6 +29,10 @@ set rtl_list [list \
     [file normalize [file join $project_root rtl tpu_top.sv]] \
     [file normalize [file join $project_root rtl uart_rx.v]] \
     [file normalize [file join $project_root rtl uart_tx.v]] \
+    [file normalize [file join $project_root rtl sevenseg_display.sv]] \
+    [file normalize [file join $project_root rtl snn_core.sv]] \
+    [file normalize [file join $project_root rtl snn_core_legacy.sv]] \
+    [file normalize [file join $project_root rtl snn_weights.sv]] \
     [file normalize [file join $project_root rtl nexys_a7_top.v]] \
 ]
 
@@ -37,6 +41,7 @@ add_files $rtl_list
 # ================= SIM FILES =================
 set sim_list [list \
     [file normalize [file join $project_root sim tb_tpu_top.sv]] \
+    [file normalize [file join $project_root sim tb_snn_core_compare.sv]] \
 ]
 
 add_files -fileset sim_1 $sim_list
