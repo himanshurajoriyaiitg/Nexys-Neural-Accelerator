@@ -351,4 +351,6 @@ flowchart TD
     Response --> IPad
     Server --> BoardDisplay[Optional board display code]
 ```
+## 🎥 Demo Video
 
+[![Watch the Demo](https://img.youtube.com/vi/Vqjhe0MYNfY/0.jpg)](https://www.youtube.com/watch?v=Vqjhe0MYNfY)
