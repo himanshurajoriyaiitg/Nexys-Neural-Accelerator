@@ -27,7 +27,7 @@ testing, and comparison before using the board.
 - [Systolic Array and Diagonal Dataflow](#systolic-array-and-diagonal-dataflow)
 - [FPGA Recognizer With iPad](#fpga-recognizer-with-ipad)
 - [Demo Video](#-demo-video)
-- 
+
 ## Key Features
 
 - Parameterized signed 8-bit matrix multiply with 32-bit-style accumulation.
