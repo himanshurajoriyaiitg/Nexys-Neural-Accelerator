@@ -10,6 +10,24 @@ The FPGA design exposes two hardware compute paths:
 The software tools also support local-only recognizer modes for development,
 testing, and comparison before using the board.
 
+## Quick Links
+
+- [Key Features](#key-features)
+- [Requirements](#requirements)
+- [Recognizer Run Guide](#recognizer-run-guide)
+- [Common Setup](#common-setup)
+- [Run Recognizer On PC Using Software](#1-run-recognizer-on-pc-using-software)
+- [Run Recognizer On FPGA Without iPad](#2-run-recognizer-on-fpga-without-ipad)
+- [Run Recognizer On FPGA Using iPad](#3-run-recognizer-on-fpga-using-ipad)
+- [FPGA LED Mapping](#fpga-led-mapping)
+- [Data Flow](#data-flow)
+- [Overall System Data Flow](#overall-system-data-flow)
+- [Matrix Multiplication Path](#2-matrix-multiplication-path)
+- [Matrix Accelerator Internal Data Flow](#matrix-accelerator-internal-data-flow)
+- [Systolic Array and Diagonal Dataflow](#systolic-array-and-diagonal-dataflow)
+- [FPGA Recognizer With iPad](#fpga-recognizer-with-ipad)
+- [Demo Video](#-demo-video)
+- 
 ## Key Features
 
 - Parameterized signed 8-bit matrix multiply with 32-bit-style accumulation.
